@@ -47,6 +47,7 @@ extern "C" {
 #include "voe.h"
 #include "interleaver.h"
 
+//#define NETEQ_LOGGING 1
 
 static void tmr_transport_handler(void *arg);
 
@@ -202,27 +203,41 @@ static void tmr_neteq_stats_handler(void *arg)
 			voe->rtp_rtcp->GetRTCPStatistics(ch_id, stats);
 			chstat.Rtt_ms = stats.rttMs;
 			chstat.jitter_smpls = stats.jitterSamples;
-            
+			
 			unsigned int NTPHigh = 0, NTPLow = 0, timestamp = 0, playoutTimestamp = 0, jitter = 0;
 			unsigned short fractionLostUp_Q8 = 0; // Uplink packet loss as reported by remote side
 			voe->rtp_rtcp->GetRemoteRTCPData( ch_id, NTPHigh, NTPLow, timestamp, playoutTimestamp, &jitter, &fractionLostUp_Q8);
             
 			chstat.uplink_loss_q8 = fractionLostUp_Q8;
 			chstat.uplink_jitter_smpls = jitter;
+			
             
-			memcpy(&cd->ch_stats[cd->stats_idx], &chstat, sizeof(chstat));
+			memcpy(&cd->ch_stats[cd->stats_idx], &chstat, sizeof(chstat));			
 			cd->stats_idx++;
 			if(cd->stats_idx >= NUM_STATS){
 				cd->stats_idx = 0;
 			}
 			cd->stats_cnt++;
+
+			cd->quality.downloss = (int)(((float)(chstat.neteq_nw_stats.currentPacketLossRate)/163.84f) + 0.5f);
+			cd->quality.rtt = chstat.Rtt_ms;
+			if (cd->last_rtcp_ploss < 0)
+				cd->quality.uploss = -1;
+			else {
+				int uploss;
+
+				uploss = (int)((float)cd->last_rtcp_ploss/2.55f
+					       + 0.5f);
+				cd->quality.uploss = uploss;
+			}
+			
 #if NETEQ_LOGGING
 			float pl_rate = ((float)chstat.neteq_nw_stats.currentPacketLossRate)/163.84f; // convert Q14 -> float and fraction to percent
 			float fec_rate = ((float)chstat.neteq_nw_stats.currentSecondaryDecodedRate)/163.84f; // convert Q14 -> float and fraction to percent
 			float exp_rate = ((float)chstat.neteq_nw_stats.currentExpandRate)/163.84f;
 			float acc_rate = ((float)chstat.neteq_nw_stats.currentAccelerateRate)/163.84f;
 			float dec_rate = ((float)chstat.neteq_nw_stats.currentPreemptiveRate)/163.84f;
-			info("ch# %d BufferSize = %d ms PacketLossRate = %.2f ExpandRate = %.2f fec_rate = %.2f AccelerateRate = %.2f DecelerateRate = %.2f \n", ch_id, chstat.neteq_nw_stats.currentBufferSize, pl_rate, exp_rate, fec_rate, acc_rate, dec_rate);
+			info("ch# %d BufferSize = %d ms PacketLossRate = %.2f(%d) ExpandRate = %.2f fec_rate = %.2f AccelerateRate = %.2f DecelerateRate = %.2f \n", ch_id, chstat.neteq_nw_stats.currentBufferSize, pl_rate, (int)chstat.neteq_nw_stats.currentPacketLossRate, exp_rate, fec_rate, acc_rate, dec_rate);
 #endif
 		}
 	}
@@ -276,10 +291,7 @@ static void ve_destructor(void *arg)
         
 		gvoe.base->Terminate();
         
-		if(gvoe.aio){
-			gvoe.aio = (struct audio_io *)mem_deref(gvoe.aio);
-		}
-		voe_stop_audio_test(&gvoe);        
+		voe_stop_audio_test(&gvoe);
 	}
     
 #if FORCE_AUDIO_RTP_RECORDING
@@ -305,7 +317,6 @@ int voe_ve_alloc(struct voe_channel **vep, const struct aucodec *ac,
 	webrtc::CodecInst c;
 	int err = 0;
 	int bitrate_bps;
-	int packet_size_ms;
 	bool test_mode = false;
 
 	ve = (struct voe_channel *)mem_zalloc(sizeof(*ve), ve_destructor);
@@ -329,11 +340,10 @@ int voe_ve_alloc(struct voe_channel **vep, const struct aucodec *ac,
 
 		webrtc::AudioDeviceModule* adm = NULL;
 		if(gvoe.aio){
-			mem_ref(gvoe.aio);
 			adm = (webrtc::AudioDeviceModule*)gvoe.aio->aioc;
 		}
 		if (avs_get_flags() & AVS_FLAG_AUDIO_TEST){
-			audio_io_alloc(&gvoe.autest.aio, AUDIO_IO_MODE_MOCK_REALTIME, NULL, NULL);
+			audio_io_alloc(&gvoe.autest.aio, AUDIO_IO_MODE_MOCK_REALTIME);
 			adm = (webrtc::AudioDeviceModule*)gvoe.autest.aio->aioc;
 		}
 		info("voe: First Channel created call voe.base->Init() gvoe.adm = %p \n", adm);
@@ -366,8 +376,6 @@ int voe_ve_alloc(struct voe_channel **vep, const struct aucodec *ac,
 	}
     
 	bitrate_bps = gvoe.manual_bitrate_bps ? gvoe.manual_bitrate_bps : gvoe.bitrate_bps;
-	packet_size_ms = gvoe.manual_packet_size_ms ? gvoe.manual_packet_size_ms :
-        std::max( gvoe.packet_size_ms, gvoe.min_packet_size_ms );
     
 	ve->ch = gvoe.base->CreateChannel();
 	if (ve->ch == -1) {
@@ -383,7 +391,8 @@ int voe_ve_alloc(struct voe_channel **vep, const struct aucodec *ac,
 
 	voe_setup_opus( ZETA_OPUS_USE_STEREO, ZETA_OPUS_BITRATE_HI_BPS, &c);
     
-	c.pacsize = (c.plfreq * packet_size_ms) / 1000;
+	/* AUDIO-1450 - start with 20ms packets, will be updated later */
+	c.pacsize = (c.plfreq * 20) / 1000;
 	c.rate = bitrate_bps;
     
 	gvoe.codec->SetSendCodec(ve->ch, c);

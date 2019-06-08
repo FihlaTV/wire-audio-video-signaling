@@ -20,53 +20,6 @@
 struct ecall;
 
 
-typedef int  (ecall_transp_send_h)(const char *userid_sender,
-				   struct econn_message *msg, void *arg);
-
-
-/**
- * Incoming call, may be called multiple times
- */
-typedef void (ecall_conn_h)(uint32_t msg_time, const char *userid_sender,
-			    bool video_call, void *arg);
-
-
-/** Call has been aswered
- */
-typedef void (ecall_answer_h)(void *arg);
-
-/**
- * Want to start media, called once.
- */
-typedef void (ecall_media_start_h)(void *arg);
-
-/**
- * Call/media established, called after every UPDATE.
- */
-typedef void (ecall_media_estab_h)(struct ecall *ecall, bool update, void *arg);
-
-/**
- * Call/audio established, called after every UPDATE.
- */
-typedef void (ecall_audio_estab_h)(struct ecall *ecall, bool update, void *arg);
-
-/**
- * The Data-Channel was established, called after every UPDATE.
- */
-typedef void (ecall_datachan_estab_h)(void *arg, bool update);
-
-/**
- * We received a PROPSYNC from remote side, called multiple times.
- */
-typedef void (ecall_propsync_h)(void *arg);
-
-
-/**
- * The call was terminated, called once.
- */
-typedef void (ecall_close_h)(int err, const char *metrics_json, struct ecall *ecall,
-	uint32_t msg_time, void *arg);
-
 struct ecall_conf {
 	struct econn_conf econf;
 	int trace;
@@ -74,34 +27,34 @@ struct ecall_conf {
 
 
 int  ecall_alloc(struct ecall **ecallp, struct list *ecalls,
+		 enum icall_conv_type conv_type,
 		 const struct ecall_conf *conf,
 		 struct msystem *msys,
 		 const char *convid, const char *userid_self,
-		 const char *clientid,
-		 ecall_conn_h *connh,
-		 ecall_answer_h *answerh,
-		 ecall_media_estab_h *media_estabh,
-		 ecall_audio_estab_h *audio_estabh,
-		 ecall_datachan_estab_h *datachan_estabh,
-		 ecall_propsync_h *propsynch,
-		 ecall_close_h *closeh,
-		 ecall_transp_send_h *sendh, void *arg);
-int  ecall_set_turnserver(struct ecall *ecall, const struct sa *srv,
-			  const char *user, const char *pass);
-int  ecall_start(struct ecall *ecall);
-int  ecall_answer(struct ecall *ecall);
+		 const char *clientid);
+struct icall *ecall_get_icall(struct ecall* ecall);
+int ecall_add_turnserver(struct ecall *ecall,
+			 struct zapi_ice_server *srv);
+int  ecall_start(struct ecall *ecall,
+		 enum icall_call_type call_type,
+		 bool audio_cbr,
+		 void *extcodec_arg);
+int  ecall_answer(struct ecall *ecall,
+		  enum icall_call_type call_type,
+		  bool audio_cbr,
+		  void *extcodec_arg);
 void ecall_transp_recv(struct ecall *ecall,
 		       uint32_t curr_time, /* in seconds */
 		       uint32_t msg_time, /* in seconds */
 		       const char *userid_sender,
 		       const char *clientid_sender,
 		       const char *str);
-void ecall_msg_recv(struct ecall *ecall,
-		    uint32_t curr_time, /* in seconds */
-		    uint32_t msg_time, /* in seconds */
-		    const char *userid_sender,
-		    const char *clientid_sender,
-		    struct econn_message *msg);
+int ecall_msg_recv(struct ecall *ecall,
+		   uint32_t curr_time, /* in seconds */
+		   uint32_t msg_time, /* in seconds */
+		   const char *userid_sender,
+		   const char *clientid_sender,
+		   struct econn_message *msg);
 void ecall_end(struct ecall *ecall);
 void ecall_set_peer_userid(struct ecall *ecall, const char *userid);
 void ecall_set_peer_clientid(struct ecall *ecall, const char *clientid);
@@ -117,14 +70,61 @@ struct econn *ecall_get_econn(const struct ecall *ecall);
 enum econn_state ecall_state(const struct ecall *ecall);
 int ecall_media_start(struct ecall *ecall);
 void ecall_media_stop(struct ecall *ecall);
-int ecall_set_video_send_active(struct ecall *ecall, bool active);
+int ecall_set_video_send_state(struct ecall *ecall, enum icall_vstate vstate);
+int ecall_set_group_mode(struct ecall *ecall, bool active);
 bool ecall_is_answered(const struct ecall *ecall);
 bool ecall_has_video(const struct ecall *ecall);
 int ecall_propsync_request(struct ecall *ecall);
 const char *ecall_props_get_local(struct ecall *ecall, const char *key);
 const char *ecall_props_get_remote(struct ecall *ecall, const char *key);
-void ecall_trace(const struct ecall *ecall, bool tx, const char *fmt, ...);
+void ecall_trace(struct ecall *ecall, const struct econn_message *msg,
+		 bool tx, enum econn_transport tp,
+		 const char *fmt, ...);
 int  ecall_restart(struct ecall *ecall);
 
 struct conf_part *ecall_get_conf_part(struct ecall *ecall);
 void ecall_set_conf_part(struct ecall *ecall, struct conf_part *cp);
+
+
+#define MAX_USER_DATA_SIZE (1024*64) // 64 kByte
+
+typedef void (ecall_user_data_ready_h)(int size, void *arg);
+typedef void (ecall_user_data_rcv_h)(uint8_t *data, size_t len, void *arg);
+typedef void (ecall_user_data_file_rcv_h)(const char *location, void *arg);
+typedef void (ecall_user_data_file_snd_h)(const char *name, bool success, void *arg);
+
+int ecall_add_user_data(struct ecall *ecall,
+                ecall_user_data_ready_h *ready_h,
+                ecall_user_data_rcv_h *rcv_h,
+                void *arg);
+
+int ecall_user_data_send(struct ecall *ecall,
+                const void *data,
+                size_t len);
+
+int ecall_user_data_send_file(struct ecall *ecall,
+                const char *file,
+                const char *name,
+                int speed_kbps);
+
+int ecall_user_data_register_ft_handlers(struct ecall *ecall,
+                const char *rcv_path,
+                ecall_user_data_file_rcv_h *f_rcv_h,
+                ecall_user_data_file_snd_h *f_snd_h);
+
+int ecall_set_quality_interval(struct ecall *ecall,
+			       uint64_t interval);
+
+
+/* Device pairing */
+void ecall_set_devpair(struct ecall *ecall, bool devpair);
+int  ecall_devpair_start(struct ecall *ecall);
+int  ecall_devpair_answer(struct ecall *ecall,
+			  struct econn_message *msg,
+			  const char *pairid);
+int  ecall_devpair_ack(struct ecall *ecall,
+		       struct econn_message *msg,
+		       const char *pairid);
+int ecall_remove(struct ecall *ecall);
+
+

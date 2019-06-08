@@ -314,7 +314,9 @@ public class MediaManager implements OnAudioFocusChangeListener {
         // SSJ will there ever be more than one listener ??
         DoLog("onPlaybackRouteChanged \n");
         this.route = route;
-        Iterator<MediaManagerListener> iterator = this.getListenerSet().iterator();
+
+	HashSet<MediaManagerListener>  listenerSet = (HashSet<MediaManagerListener>)((HashSet)this.getListenerSet()).clone();
+        Iterator<MediaManagerListener> iterator = listenerSet.iterator();
         
         while ( iterator.hasNext() ) {
             MediaManagerListener listener = iterator.next();
@@ -332,7 +334,8 @@ public class MediaManager implements OnAudioFocusChangeListener {
             mCat = FlowManager.MCAT_NORMAL;
         }
 
-        Iterator<MediaManagerListener> iterator = this.getListenerSet().iterator();
+	HashSet<MediaManagerListener>  listenerSet = (HashSet<MediaManagerListener>)((HashSet)this.getListenerSet()).clone();
+        Iterator<MediaManagerListener> iterator = listenerSet.iterator();
         
         while ( iterator.hasNext() ) {
             MediaManagerListener listener = iterator.next();
@@ -354,6 +357,13 @@ public class MediaManager implements OnAudioFocusChangeListener {
         audioManager.requestAudioFocus(this, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN);
         
         this.audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+    }
+
+    public void onAudioFocus() {
+	    DoLog("onAudioFocus: mode=" + this.audioManager.getMode());
+
+	    this.audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+	    this.audioManager.requestAudioFocus(this, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN);
     }
 
     public void onExitCall(){

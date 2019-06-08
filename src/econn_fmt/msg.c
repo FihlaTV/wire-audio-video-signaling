@@ -105,6 +105,9 @@ int econn_message_encode(char **strp, const struct econn_message *msg)
 	case ECONN_HANGUP:
 		break;
 
+	case ECONN_REJECT:
+		break;
+
 	case ECONN_PROPSYNC:
 
 		/* props is mandatory for PROPSYNC */
@@ -120,8 +123,45 @@ int econn_message_encode(char **strp, const struct econn_message *msg)
 		break;
 
 	case ECONN_GROUP_START:
+		/* props is optional for GROUPSTART */
+		if (msg->u.groupstart.props) {
+			err = econn_props_encode(jobj, msg->u.groupstart.props);
+			if (err)
+				goto out;
+		}
+		break;
+
 	case ECONN_GROUP_LEAVE:
 	case ECONN_GROUP_CHECK:
+		break;
+
+	case ECONN_DEVPAIR_PUBLISH:
+		err = zapi_iceservers_encode(jobj,
+					     msg->u.devpair_publish.turnv,
+					     msg->u.devpair_publish.turnc);
+		if (err)
+			goto out;
+
+		err = jzon_add_str(jobj, "sdp",
+				   msg->u.devpair_publish.sdp);
+		err |= jzon_add_str(jobj, "username",
+				    msg->u.devpair_publish.username);
+		if (err)
+			goto out;
+		break;
+
+	case ECONN_DEVPAIR_ACCEPT:
+		err = jzon_add_str(jobj, "sdp",
+				   msg->u.devpair_accept.sdp);
+		if (err)
+			goto out;
+		break;
+
+	case ECONN_ALERT:
+		err  = jzon_add_int(jobj, "level", msg->u.alert.level);
+		err |= jzon_add_str(jobj, "descr", msg->u.alert.descr);
+		if (err)
+			goto out;
 		break;
 
 	default:
@@ -291,7 +331,7 @@ int econn_message_decode(struct econn_message **msgp,
 		err = econn_props_decode(&msg->u.setup.props, jobj);
 		if (err)
 			info("econn: decode UPDATE: no props\n");
-	}	
+	}
 	else if (0 == str_casecmp(type, econn_msg_name(ECONN_CANCEL))) {
 
 		msg->msg_type = ECONN_CANCEL;
@@ -299,6 +339,10 @@ int econn_message_decode(struct econn_message **msgp,
 	else if (0 == str_casecmp(type, econn_msg_name(ECONN_HANGUP))) {
 
 		msg->msg_type = ECONN_HANGUP;
+	}
+	else if (0 == str_casecmp(type, econn_msg_name(ECONN_REJECT))) {
+
+		msg->msg_type = ECONN_REJECT;
 	}
 	else if (0 == str_casecmp(type, econn_msg_name(ECONN_PROPSYNC))) {
 
@@ -311,6 +355,10 @@ int econn_message_decode(struct econn_message **msgp,
 	else if (0 == str_casecmp(type, econn_msg_name(ECONN_GROUP_START))) {
 
 		msg->msg_type = ECONN_GROUP_START;
+
+		/* Props are optional, dont fail to decode message if they are missing */
+		if (econn_props_decode(&msg->u.groupstart.props, jobj))
+			info("econn: decode GROUPSTART: no props\n");
 	}
 	else if (0 == str_casecmp(type, econn_msg_name(ECONN_GROUP_LEAVE))) {
 
@@ -319,6 +367,75 @@ int econn_message_decode(struct econn_message **msgp,
 	else if (0 == str_casecmp(type, econn_msg_name(ECONN_GROUP_CHECK))) {
 
 		msg->msg_type = ECONN_GROUP_CHECK;
+	}
+	else if (0 == str_casecmp(type,
+				  econn_msg_name(ECONN_DEVPAIR_PUBLISH))) {
+
+		struct json_object *jturns;
+
+		msg->msg_type = ECONN_DEVPAIR_PUBLISH;
+
+		err = jzon_array(&jturns, jobj, "ice_servers");
+		if (err) {
+			warning("econn: devpair_publish: no ICE servers\n");
+			goto out;
+		}
+
+		err = zapi_iceservers_decode(jturns,
+					     &msg->u.devpair_publish.turnv,
+					     &msg->u.devpair_publish.turnc);
+		if (err) {
+			warning("econn: devpair_publish: "
+				"could not decode ICE servers (%m)\n", err);
+			goto out;
+		}
+
+		err = jzon_strdup(&msg->u.devpair_publish.sdp,
+				  jobj, "sdp");
+		if (err) {
+			warning("econn: devpair_publish: "
+				"could not find SDP in message\n");
+			goto out;
+		}
+		err = jzon_strdup(&msg->u.devpair_publish.username,
+				  jobj, "username");
+		if (err) {
+			warning("econn: devpair_publish: "
+				"could not find username in message\n");
+			goto out;
+		}
+	}
+	else if (0 == str_casecmp(type,
+				  econn_msg_name(ECONN_DEVPAIR_ACCEPT))) {
+
+		msg->msg_type = ECONN_DEVPAIR_ACCEPT;
+
+		err = jzon_strdup(&msg->u.devpair_accept.sdp,
+				  jobj, "sdp");
+		if (err) {
+			warning("econn: devpair_accept: "
+				"could not find SDP in message\n");
+			goto out;
+		}
+	}
+	else if (0 == str_casecmp(type, econn_msg_name(ECONN_ALERT))) {
+
+		msg->msg_type = ECONN_ALERT;
+
+		err = jzon_u32(&msg->u.alert.level, jobj, "level");
+		if (err) {
+			warning("econn: alert: "
+				"could not find level in message\n");
+			goto out;
+		}
+
+		err = jzon_strdup(&msg->u.alert.descr,
+				  jobj, "descr");
+		if (err) {
+			warning("econn: alert: "
+				"could not find descr in message\n");
+			goto out;
+		}
 	}
 	else {
 		warning("econn: decode: unknown message type '%s'\n", type);

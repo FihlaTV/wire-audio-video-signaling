@@ -21,7 +21,9 @@
 #include <avs_vie.h>
 #include "vie.h"
 #include "vie_renderer.h"
-#include "webrtc/common_video/libyuv/include/scaler.h"
+#include "webrtc/common_video/libyuv/include/webrtc_libyuv.h"
+
+#define STATS_DELAY 20000
 
 extern "C" {
 void frame_timeout_timer(void *arg)
@@ -34,13 +36,16 @@ void frame_timeout_timer(void *arg)
 }
 };
 
-ViERenderer::ViERenderer()
+ViERenderer::ViERenderer(const char *userid_remote)
 	: _state(VIE_RENDERER_STATE_STOPPED)
 	, _ts_last(0)
+	, _fps_count(0)
 {
 	lock_alloc(&_lock);
 	tmr_init(&_timer);
 
+	str_dup(&_userid_remote, userid_remote);
+	_ts_fps = tmr_jiffies();
 	tmr_start(&_timer, VIE_RENDERER_TIMEOUT_LIMIT,
 		  frame_timeout_timer, this);
 }
@@ -48,13 +53,19 @@ ViERenderer::ViERenderer()
 ViERenderer::~ViERenderer()
 {
 	tmr_cancel(&_timer);
-	if (_state == VIE_RENDERER_STATE_RUNNING) {
+	SetState(VIE_RENDERER_STATE_STOPPED);
+	mem_deref(_userid_remote);
+	mem_deref(_lock);
+}
+
+void ViERenderer::SetState(enum vie_renderer_state newState)
+{
+	if (_state != newState) {
+		_state = newState;
 		if (vid_eng.state_change_h) {
-			vid_eng.state_change_h(FLOWMGR_VIDEO_RECEIVE_STOPPED,
-				FLOWMGR_VIDEO_NORMAL, vid_eng.cb_arg);
+			vid_eng.state_change_h(_userid_remote, newState, vid_eng.cb_arg);
 		}
 	}
-	mem_deref(_lock);
 }
 
 /*
@@ -63,22 +74,30 @@ ViERenderer::~ViERenderer()
 void ViERenderer::OnFrame(const webrtc::VideoFrame& video_frame)
 {
 	struct avs_vidframe avs_frame;
+	char userid_anon[ANON_ID_LEN];
 	int err;
-	
+
 	lock_write_get(_lock);
-	if (_state != VIE_RENDERER_STATE_RUNNING) {
-		if (vid_eng.state_change_h) {
-			vid_eng.state_change_h(FLOWMGR_VIDEO_RECEIVE_STARTED,
-				FLOWMGR_VIDEO_NORMAL, vid_eng.cb_arg);
-		}
-		_state = VIE_RENDERER_STATE_RUNNING;
-	}
-
-	/* Save the time when the last frame was received */
-	_ts_last = tmr_jiffies();
-
+	SetState(VIE_RENDERER_STATE_RUNNING);
 	lock_rel(_lock);
 
+	/* Save the time when the last frame was received */
+	uint64_t now = tmr_jiffies();
+	_ts_last = now;
+
+	_fps_count++;
+	uint64_t msec = now - _ts_fps;
+	if (msec > STATS_DELAY) {
+		if (msec < STATS_DELAY + 1000) {
+			info("vie_renderer_handle_frame user: %s hndlr: %p "
+				"res: %dx%d fps: %0.2f\n",
+				anon_id(userid_anon, _userid_remote),
+				vid_eng.render_frame_h, video_frame.width(),
+				video_frame.height(), (float)_fps_count * 1000.0f / msec); 
+		}
+		_fps_count = 0;
+		_ts_fps = now;
+	}
 
 	if (!vid_eng.render_frame_h)
 		return;
@@ -114,9 +133,9 @@ void ViERenderer::OnFrame(const webrtc::VideoFrame& video_frame)
 		break;
 	}
 
-	err = vid_eng.render_frame_h(&avs_frame, vid_eng.cb_arg);
+	err = vid_eng.render_frame_h(&avs_frame, _userid_remote, vid_eng.cb_arg);
 	if (err == ERANGE && vid_eng.size_h)
-		vid_eng.size_h(avs_frame.w, avs_frame.h, vid_eng.cb_arg);
+		vid_eng.size_h(avs_frame.w, avs_frame.h, _userid_remote, vid_eng.cb_arg);
 		
 }
 
@@ -143,11 +162,7 @@ void ViERenderer::ReportTimeout()
 
 	if (timeout && _state == VIE_RENDERER_STATE_RUNNING)
 	{
-		if (vid_eng.state_change_h) {
-			vid_eng.state_change_h(FLOWMGR_VIDEO_RECEIVE_STOPPED,
-				FLOWMGR_VIDEO_BAD_CONNECTION, vid_eng.cb_arg);
-		}
-		_state = VIE_RENDERER_STATE_TIMEDOUT;
+		SetState( VIE_RENDERER_STATE_TIMEDOUT);
 	}
 
 	lock_rel(_lock);

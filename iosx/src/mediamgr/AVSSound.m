@@ -17,8 +17,8 @@
 */
 
 #import "AVSSound.h"
-
-
+#include <re.h>
+#include <avs.h>
 @interface AVSSound ( )
 
 - (void)updateVolume;
@@ -48,17 +48,6 @@
 }
 
 
-- (BOOL)looping
-{
-    return self.player.numberOfLoops < 0;
-}
-
-- (void)setLooping:(BOOL)looping
-{
-    self.player.numberOfLoops = looping ? -1 : 0;
-}
-
-
 - (BOOL)playbackMuted
 {
     return self.muted;
@@ -77,66 +66,150 @@
     return nil;
 }
 
-- (instancetype)initWithName:(NSString *)name andAudioPlayer:(AVAudioPlayer *)player
+- (instancetype)initWithName:(NSString *)name
+		      andUrl:(NSURL *)url
+		     looping:(BOOL)loop
 {
-    self = [super init];
-    
-    if ( self ) {
-        self.name = name;
-        self.player = player;
-        
-        player.delegate = self;
-    }
-    
-    return name && player ? self : nil;
+	self = [super init];
+
+	if (self) {
+		self.name = name;
+		self.url = url;
+		_looping = loop;
+
+		info("AVSSound: initWithName: %s loop=%d\n",
+		     [self.name UTF8String], _looping);
+	}
+
+	return self;
 }
 
 
 - (void)play
 {
-    dispatch_sync(dispatch_get_main_queue(),^{
-        [self.player setCurrentTime:0];
-        [self.player play];
-    });
-    [self.delegate didStartPlayingMedia:self];
+	info("AVSSound: play %s\n", [self.name UTF8String]);
+	
+	if (self.player == nil) {
+		dispatch_sync(dispatch_get_main_queue(), ^{		
+		        self.player = [[AVAudioPlayer alloc]
+						    initWithContentsOfURL:_url
+								    error:nil];
+			if (self.player == nil) {
+				warning("AVSSound: cannot alloc player\n");
+				return;
+			}
+
+			self.player.delegate = self;
+			self.player.numberOfLoops = self.looping ? -1 : 0;
+			[self.player prepareToPlay];
+		});
+	}
+
+	if (![self.delegate canStartPlayingMedia:self])
+		return;
+	
+	dispatch_sync(dispatch_get_main_queue(), ^{
+		[self.player setCurrentTime:0];
+		[self.player play];
+	});
+
+	int n = 100;
+	while (!self.player.playing && n-- > 0) {
+		usleep(20000);
+	}
+	if (n <= 0)
+		info("AVSSound playing did not start\n");
+	else
+		[self.delegate didStartPlayingMedia:self];
+     
+	info("AVSSound: %s playing=%s\n",
+	     [self.name UTF8String],
+	     self.player.playing ? "yes" : "no");
 }
 
 - (void)stop
 {
-    dispatch_sync(dispatch_get_main_queue(),^{
-        [self.player stop];
-        [self.player setCurrentTime:0];
-    });
-    [self.delegate didFinishPlayingMedia:self];
+	int n;
+	
+	info("AVSSound: stop: %s player=%p\n", [_name UTF8String], self.player);
+
+	if (self.player == nil)
+		return;
+			
+	dispatch_sync(dispatch_get_main_queue(), ^{
+		[self.player stop];
+		[self.player setCurrentTime:0];
+	});
+
+	n = 10;
+	while (self.player.playing && n-- > 0) {
+		usleep(50000);
+		info("AVSSound: stop: %s playing=%s\n",
+		     [_name UTF8String], self.player.playing ? "yes" : "no");
+	}
+
+	[self.delegate didFinishPlayingMedia:self];
 }
 
 
 - (void)pause
 {
-    dispatch_sync(dispatch_get_main_queue(),^{
-        [self.player pause];
-    });
-    [self.delegate didPausePlayingMedia:self];
+	if (self.player == nil)
+		return;
+	
+	[self.player pause];
+	[self.delegate didPausePlayingMedia:self];
 }
 
 - (void)resume
 {
-    dispatch_sync(dispatch_get_main_queue(),^{
+	if (self.player == nil)
+		return;
+	
         [self.player play];
-    });
-    [self.delegate didResumePlayingMedia:self];
+	[self.delegate didResumePlayingMedia:self];
+}
+
+
+- (void)reset
+{
+	AVAudioPlayer *player;
+	player = [[AVAudioPlayer alloc]
+				 initWithContentsOfURL:self.url
+						 error:nil];
+	player.delegate = self;
+	player.numberOfLoops = self.player.numberOfLoops;
+	[player prepareToPlay];
+
+	self.player = player;
 }
 
 
 - (void)updateVolume
 {
-    self.player.volume = self.muted ? 0 : self.level;
+	if (self.player == nil)
+		return;
+
+	self.player.volume = self.muted ? 0 : self.level;
 }
 
 
-- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag
+- (void)audioPlayerDecodeErrorDidOccur:(AVAudioPlayer *)player 
+                                 error:(NSError *)err
 {
-    [self.delegate didFinishPlayingMedia:self];
+	info("AVSSound: %s audioPlayerDecodeErrorDidOccur: error=%s\n",
+	     [_name UTF8String],
+	     [err.localizedDescription UTF8String]);
+}
+
+
+- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player 
+                       successfully:(BOOL)flag
+{
+	info("AVSSound: %s audioPlayerDidFinishPlaying\n",
+	     [_name UTF8String]);
+
+	[self.delegate didFinishPlayingMedia:self];
 }
 
 @end

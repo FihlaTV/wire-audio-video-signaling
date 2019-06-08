@@ -80,7 +80,7 @@ public class VideoCapturer implements PreviewCallback,
 	
 	public static VideoCapturerInfo[] getCapturers() {
 
-		
+
 		@SuppressWarnings("deprecation")	
 		int n = Camera.getNumberOfCameras();
 		VideoCapturerInfo[] devInfos;
@@ -154,12 +154,15 @@ public class VideoCapturer implements PreviewCallback,
 				camera.setPreviewCallback(null);
 				camera.stopPreview();
 				this.started = false;
-				camera.unlock();
+				//camera.unlock();
 				Log.d(TAG, "stopCamera: stopped");
 			}
 			catch(Exception e) {
 				Log.e(TAG, "stopCamera: failed: " + e);
 			}
+			
+			camera.release();
+			camera = null;
 		}
 
 		lock.unlock();
@@ -171,12 +174,15 @@ public class VideoCapturer implements PreviewCallback,
 	    if (camera == null)
 		    return;
 
+	    destroying = true;
+
 	    Runnable r = new Runnable() {
 		@Override
 		public void run() {
 			stopCamera();
 
 			lock.lock();
+			/*
 			try {
 				camera.reconnect();
 				camera.release();
@@ -185,6 +191,7 @@ public class VideoCapturer implements PreviewCallback,
 			catch(IOException ioe) {
 				Log.e(TAG, "destroy: reconnect failed: " + ioe);
 			}
+			*/
 		
 			Log.d(TAG, "destroy: camera released");
 			previewView = null;
@@ -233,30 +240,6 @@ public class VideoCapturer implements PreviewCallback,
 		Runnable r = new Runnable() {
 			@Override
 			public void run() {
-				VideoPreview vp = (VideoPreview)view;
-
-				if (vp == null) {
-					Log.e(TAG, "statCapture failed. No view");
-					return;
-				}
-				
-				int vrot = getViewRotation();
-				Log.d(TAG, "startCapture on main: " + vp + " rot:" + vrot +
-					"facing: " + cameraInfo.facing);
-
-				if (camera != null) {
-					try {
-						camera.setDisplayOrientation(vrot);
-					}
-					catch (RuntimeException e){
-						Log.d(TAG, "startCapture: exception calling " +
-							"setDisplayOrientation: " +
-							e.getMessage());
-
-					}
-				}
-				vp.setVideoOrientation(vrot);
-
 				view.setSurfaceTextureListener(VideoCapturer.this);
 				if (view.isAvailable()) {
 					startCamera(view.getSurfaceTexture());
@@ -288,29 +271,51 @@ public class VideoCapturer implements PreviewCallback,
 		
 		lock.lock();
 		try {
-			Log.d(TAG, "Using camera dev="+ cap.dev + "facing=" + cap.facing);
+			Log.d(TAG, "Using camera dev="+ cap.dev + " facing=" + cap.facing);
+			if (camera != null) {
+				camera.release();
+				camera = null;
+			}
 			cameraInfo = new CameraInfo();
 			Camera.getCameraInfo(cap.dev, cameraInfo);
+			Log.d(TAG, "Camera.open");
 			camera = Camera.open(cap.dev);
+			Log.d(TAG, "Camera.getParameters");
 			params = camera.getParameters();
 
 			/* Auto focus */
+			Log.d(TAG, "Params.getSupportedFocusModes");
 			List<String> focusModes = params.getSupportedFocusModes();
-			if (supportsAutoFocus(focusModes))
+			if (supportsAutoFocus(focusModes)) {
+				Log.d(TAG, "Params.setFocusMode: AUTO");
 				params.setFocusMode(Camera.Parameters.FOCUS_MODE_AUTO);
+			}
+			else {
+				Log.d(TAG, "no AUTO_FOCUS");
+			}
 
 			/* FPS */
+			Log.d(TAG, "Params.getSupportedPreviewFps");
 			List<int[]> ranges = params.getSupportedPreviewFpsRange();
 			int[] range = getFpsRange(fps, ranges);
-			if (range != null)
+			if (range != null) {				
+				Log.d(TAG, "Params.setPreviewFps: " + range[0] + "-" + range[1]);
 				params.setPreviewFpsRange(range[0], range[1]);
+			}
+			else {
+				Log.d(TAG, "no range");	
+			}
 
 			/* Size */
+			Log.d(TAG, "Params.getSupportedPreviewSize");
 			List<Camera.Size> sizes = params.getSupportedPreviewSizes();
 			this.size = getPreviewSize(w, h, sizes);
+			Log.d(TAG, "Params.setPreviewSize: " + this.size.width + "x" + this.size.height);
 			params.setPreviewSize(this.size.width, this.size.height);
 			int format = ImageFormat.NV21;
+			Log.d(TAG, "Params.setPreviewFormat");
 			params.setPreviewFormat(format);
+			Log.d(TAG, "Camera.setParams");
 			camera.setParameters(params);
 
 			/*
@@ -331,16 +336,26 @@ public class VideoCapturer implements PreviewCallback,
 			}
 			failed = true;
 		}
+		lock.unlock();
 
 
 		if (failed)
 			cameraFailed();
-		
 	}
+
 	private void initCamera(int facing, int w, int h, int fps) {
-		VideoCapturerInfo[] capturers = getCapturers();
-		int n = capturers.length;
+		VideoCapturerInfo[] capturers;
+
+		try {
+			capturers = getCapturers();
+		}
+		catch (Exception e) {
+			Log.e(TAG, "initCamera: failed: " + e);
+			cameraFailed();
+			return;
+		}
 		
+		int n = capturers.length;		
 		if (n < 1) {
 			cameraFailed();
 			return;
@@ -352,7 +367,7 @@ public class VideoCapturer implements PreviewCallback,
 				initCameraByCap(cap, w, h, fps);
 				break;
 			}
-		}		
+		}
 	}
 
 
@@ -462,9 +477,25 @@ public class VideoCapturer implements PreviewCallback,
 			Log.w(TAG, "startCamera: failed to initCamera");
 		}
 		else {
+			VideoPreview vp = (VideoPreview)this.previewView;	
+			int vrot = getViewRotation();
+			
+			Log.d(TAG, "startCamera: " + vp + " rot:" + vrot +
+					"facing: " + cameraInfo.facing);
+
+			try {
+				camera.setDisplayOrientation(vrot);
+			}
+			catch (RuntimeException e){
+				Log.d(TAG, "startCapture: exception calling " +
+				      "setDisplayOrientation: " +
+				      e.getMessage());
+			}
+			vp.setVideoOrientation(vrot);
+
 			try {
 				if (!this.started) {
-					this.camera.reconnect();
+					//this.camera.reconnect();
 					this.camera.setPreviewTexture(surface);
 					this.camera.setPreviewCallback(this);
 					this.camera.startPreview();
@@ -474,6 +505,8 @@ public class VideoCapturer implements PreviewCallback,
 			}
 			catch (Exception e) {
 				Log.e(TAG, "startCamera: failed: " + e);
+				this.camera.release();
+				this.camera = null;
 				cameraFailed();
 			}
 		}

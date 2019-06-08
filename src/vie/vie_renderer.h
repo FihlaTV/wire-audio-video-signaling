@@ -22,19 +22,13 @@
 #define VIE_RENDERER_TIMEOUT_LIMIT 10000
 
 #include "webrtc/media/base/videosinkinterface.h"
-//#include "webrtc/modules/video_render/include/video_render.h"
 #include <re.h>
 
-enum ViERendererState {
-	VIE_RENDERER_STATE_STOPPED = 0,
-	VIE_RENDERER_STATE_RUNNING,
-	VIE_RENDERER_STATE_TIMEDOUT
-};
 	
 class ViERenderer : public rtc::VideoSinkInterface<webrtc::VideoFrame>
 {
 public:
-	ViERenderer();
+	ViERenderer(const char *userid_remote);
 	virtual ~ViERenderer();
     
 	void OnFrame(const webrtc::VideoFrame& video_frame);
@@ -42,10 +36,15 @@ public:
 	void ReportTimeout();
 
 private:
-	enum ViERendererState _state;
+	enum vie_renderer_state _state;
 	lock *_lock;
 	struct tmr _timer;
 	uint64_t _ts_last;
+	uint64_t _ts_fps;
+	uint32_t _fps_count;
+	char *_userid_remote;
+
+	void SetState(enum vie_renderer_state newState);
 };
 
 #endif

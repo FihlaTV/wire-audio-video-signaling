@@ -166,7 +166,6 @@ void AVSError ( NSString *message, ... )
 
 @end
 
-
 @interface AVSMediaManager()
 {
 	struct mediamgr *_mm;
@@ -179,6 +178,8 @@ void AVSError ( NSString *message, ... )
 - (void)registerMedia:(NSString*)name withUrl:(NSURL*)url;
 
 @end
+
+
 
 static void on_mcat_changed(enum mediamgr_state new_mcat, void *arg)
 {
@@ -207,32 +208,9 @@ static AVSMediaManager *_defaultMediaManager;
 		mediamgr_alloc(&_mm, on_mcat_changed, (__bridge void *)(self));
 		_convId = nil;
 		_intensity = AVSIntensityLevelFull;
+		self.playbackRoute = AVSPlaybackRouteBuiltIn;
+		self.sysUpdated = NO;
 		mediamgr_register_route_change_h(_mm, avsmm_on_route_changed, (__bridge void *)(self));
-
-#if TARGET_OS_IPHONE
-			[[NSNotificationCenter defaultCenter] addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock: ^(NSNotification *notification) {
-
-			       NSLog(@"Interruption Notification");
-				     
-				NSInteger type = [[notification.userInfo valueForKey:AVAudioSessionInterruptionTypeKey] integerValue];    
-				
-				switch ( type ) {
-				    case AVAudioSessionInterruptionTypeBegan:
-					mediamgr_set_call_state(_mm, MEDIAMGR_STATE_HOLD);
-					//NSLog(@"Interruption Began - Audio Session Highjack");
-					break;
-					     
-				    case AVAudioSessionInterruptionTypeEnded:
-					//NSLog(@"Interruption Ended - Audio Session Returned");
-					[[AVAudioSession sharedInstance] setActive:YES error:nil];
-					mediamgr_set_call_state(_mm, MEDIAMGR_STATE_RESUME);
-					break;
-					     
-				    default:
-					break;
-				}
-			}];
-#endif
 	}
 
 	return self;
@@ -305,12 +283,10 @@ static AVSMediaManager *_defaultMediaManager;
 	int priority = [name hasPrefix:@"ringing"] ? 1 : 0; // TODO: get this from the file
 
 	NSLog(@"registering media %@ for file %@", name, url);
-	AVAudioPlayer *player = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
-	if (!player) {
-		return;
-	}
 
-	AVSSound *sound = [[AVSSound alloc] initWithName:name andAudioPlayer:player];
+	AVSSound *sound = [[AVSSound alloc] initWithName:name
+						  andUrl:url
+						 looping:loop];
 
 	bool is_call_media = false;
 
@@ -319,7 +295,6 @@ static AVSMediaManager *_defaultMediaManager;
 	else if ([name isEqualToString: @"ready_to_talk"])
 		is_call_media = true;
 		
-	sound.looping = loop ? YES : NO;
 	mediamgr_register_media(_mm, [name UTF8String], (__bridge_retained void *)(sound),
 		mixing, incall, intensity, priority, is_call_media);
 }
@@ -429,39 +404,66 @@ static AVSMediaManager *_defaultMediaManager;
 
 - (void)setCallState:(BOOL)inCall forConversation:(NSString *)convId
 {
-	_convId = convId;
-	mediamgr_set_call_state(_mm, inCall ? MEDIAMGR_STATE_INCALL :MEDIAMGR_STATE_NORMAL);
 }
 
 - (void)setVideoCallState:(NSString *)convId;
 {
-    _convId = convId;
-    mediamgr_set_call_state(_mm, MEDIAMGR_STATE_INVIDEOCALL);
 }
 
 - (void)setupAudioDevice
 {
-    mediamgr_set_call_state(_mm, MEDIAMGR_STATE_SETUP_AUDIO_PERMISSIONS_FROM_UI);
+	info("AVSMediaManager: setupAudioDevice\n");
+	mediamgr_enter_call(_mm);
 }
 
 - (void)resetAudioDevice
 {
-    mediamgr_set_call_state(_mm, MEDIAMGR_STATE_NORMAL_FROM_UI);
+	info("AVSMediaManager: resetAudioDevice\n");
+	//mediamgr_audio_reset(_mm);
 }
 
 - (void)startAudio
 {
-    mediamgr_set_call_state(_mm, MEDIAMGR_STATE_AUDIO_PERMISSIONS_READY);
+	info("AVSMediaManager: startAudio\n");	
+	mediamgr_audio_reset(_mm);
 }
 
 - (void)stopAudio
 {
-    //mediamgr_set_call_state(_mm, MEDIAMGR_STATE_NORMAL);
+}
+
+- (void)audioActivated
+{
+}
+
+- (void)audioDeActivated
+{
 }
 
 - (void)setUiStartsAudio:(BOOL)ui_starts_audio
 {
-    mediamgr_set_user_starts_audio(_mm, ui_starts_audio ? true : false);
+}
+
+
+static void start_rec_handler(void *arg)
+{
+	dispatch_block_t blk = (__bridge dispatch_block_t)arg;
+
+	dispatch_async(dispatch_get_main_queue(), blk);
+
+	CFRelease((__bridge void *)blk);
+}
+
+
+- (void)startRecordingWhenReady:(dispatch_block_t)blk
+{
+	mediamgr_start_recording(_mm, start_rec_handler,
+				 (void*)CFRetain((__bridge void *)blk));
+}
+
+- (void)stopRecording
+{
+	mediamgr_stop_recording(_mm);
 }
 
 - (void)mcatChanged:(enum mediamgr_state)state

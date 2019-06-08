@@ -127,6 +127,7 @@ struct video_renderer {
 	bool inited;
 	bool rounded;
 	bool should_fill;
+	float fill_ratio;
 	bool needs_recalc;
 	bool use_mask;
 	int w;
@@ -142,13 +143,15 @@ struct video_renderer {
 
 	GLfloat vertices[20];
 
+	char *userid;
+
 	void *arg;
 };
 
 
 static void check_gl(const char* op) {
 	for (GLint error = glGetError(); error; error = glGetError()) {
-		warning("glError(0x%x) after %s()\n", error, op);
+		//warning("glError(0x%x) after %s()\n", error, op);
 	}
 }
 
@@ -156,8 +159,9 @@ static void check_gl(const char* op) {
 static void print_gl(const char *name, GLenum s)
 {
 	const char *v = (const char *) glGetString(s);
-	
-	debug("avs-video_renderer: GL %s = %s\n", name, v);
+
+	(void)v;
+	//debug("avs-video_renderer: GL %s = %s\n", name, v);
 }
 
 
@@ -192,7 +196,8 @@ void vr_destructor(void *arg)
 {
 	struct video_renderer *vr = (struct video_renderer *)arg;
 
-	/* Do we need to dealloc anything here? */
+	vr->arg = NULL;
+	mem_deref(vr->userid);
 }
 
 static GLuint load_shader(GLenum shader_type, const char* src)
@@ -216,8 +221,8 @@ static GLuint load_shader(GLenum shader_type, const char* src)
 		char* buf = (char*) malloc(infolen);
 		if (buf) {
 			glGetShaderInfoLog(shader, infolen, NULL, buf);
-			warning("%s: Could not compile shader %d: %s",
-				__FUNCTION__, shader_type, buf);
+			//warning("%s: Could not compile shader %d: %s",
+			//	__FUNCTION__, shader_type, buf);
 			free(buf);
 		}
 		glDeleteShader(shader);
@@ -258,8 +263,8 @@ static GLuint create_program(const char *vertex_src,
 		char* buf = (char*) malloc(buflen);
 		if (buf) {
 			glGetProgramInfoLog(program, buflen, NULL, buf);
-			warning("%s: failed link program: %s",
-				__FUNCTION__, buf);
+			//warning("%s: failed link program: %s",
+			//	__FUNCTION__, buf);
 			free(buf);
 		}
 	}
@@ -272,11 +277,9 @@ static int setup_vertices(struct video_renderer *vr, int rotation)
 {	
 	GLfloat vw = (GLfloat)vr->w;
 	GLfloat vh = (GLfloat)vr->h;
-	GLfloat va = vw / vh;
 	
 	GLfloat fw = (GLfloat)vr->tex.w;
 	GLfloat fh = (GLfloat)vr->tex.h;
-	GLfloat fa = fw / fh;
 
 	GLfloat xscale = 1.0f;
 	GLfloat yscale = 1.0f;
@@ -285,6 +288,16 @@ static int setup_vertices(struct video_renderer *vr, int rotation)
 	int tex;
 	
 	int err = 0;
+
+	if (vr->w == 0 || vr->h == 0 ||
+	    vr->tex.w == 0 || vr->tex.h == 0) {
+		return 0;
+	}
+
+	GLfloat va = vw / vh;
+	GLfloat fa = fw / fh;
+
+	bool fill = vr->should_fill;
 
 	// 180 & 270 are double-flipped 0 & 90
 	if (rotation == 180 || rotation == 270) {
@@ -297,15 +310,22 @@ static int setup_vertices(struct video_renderer *vr, int rotation)
 		fa = 1.0f / fa;
 	}
 	
-	if (vr->should_fill == (va > fa)) {
+	if (fa / va < vr->fill_ratio &&
+	    va / fa < vr->fill_ratio) {
+		fill = true;
+	}
+	
+	if (fill == (va > fa)) {
 		yscale *= va / fa;
 	}
 	else {
 		xscale *= fa / va;
 	}
 
+#if 0
 	info("setup_vertices: view(%fx%f)%f frame(%fx%f)%f scale(%fx%f) fill %s\n",
-	      vw, vh, va, fw, fh, fa, xscale, yscale, vr->should_fill ? "YES" : "NO");
+	      vw, vh, va, fw, fh, fa, xscale, yscale, fill ? "YES" : "NO");
+#endif
 
 
 	switch (rotation) {
@@ -351,7 +371,7 @@ static int setup_vertices(struct video_renderer *vr, int rotation)
 	pos = glGetAttribLocation(vr->program, "aPosition");
 	check_gl("glGetAttribLocation aPosition");
 	if (pos == -1) {
-		warning("%s: Could not get aPosition handle", __FUNCTION__);
+		//warning("%s: Could not get aPosition handle", __FUNCTION__);
 		err = EBADF;
 		goto out;
 	}
@@ -359,8 +379,8 @@ static int setup_vertices(struct video_renderer *vr, int rotation)
 	tex = glGetAttribLocation(vr->program, "aTextureCoord");
 	check_gl("glGetAttribLocation aTextureCoord");
 	if (tex == -1) {
-		warning("%s: Could not get aTextureCoord handle",
-			__FUNCTION__);
+		//warning("%s: Could not get aTextureCoord handle",
+		//	__FUNCTION__);
 		err = EBADF;
 		goto out;
 	}
@@ -433,13 +453,16 @@ static int setup_vertices(struct video_renderer *vr, int rotation)
 
 
 int video_renderer_alloc(struct video_renderer **vrp,  int w, int h,
-			 bool rounded, void *arg)
+			 bool rounded,
+			 const char *userid, void *arg)
 {
 	struct video_renderer *vr;
 	int err = 0;
-	
+
+#if 0
 	debug("%s: width %d, height %d rounded %d",
 	      __FUNCTION__, w, h, rounded);
+#endif
 
 	if (!vir.inited)
 		init();
@@ -453,10 +476,12 @@ int video_renderer_alloc(struct video_renderer **vrp,  int w, int h,
 
 	vr->rounded = rounded;
 	vr->should_fill = true;
+	vr->fill_ratio = 0.0f;
 	vr->needs_recalc = false;
 	vr->inited = false;
 	vr->w = w;
 	vr->h = h;
+	str_dup(&vr->userid, userid);
 	vr->arg = arg;
 
 	if (err)
@@ -467,6 +492,14 @@ int video_renderer_alloc(struct video_renderer **vrp,  int w, int h,
 	}
 
 	return err;
+}
+
+void video_renderer_detach(struct video_renderer *vr)
+{
+	if (!vr)
+		return;
+
+	vr->arg = NULL;
 }
 
 
@@ -488,8 +521,10 @@ static int renderer_init(struct video_renderer *vr)
 	glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, max_tex_units);
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, max_tex_sizes);
 
+#if 0
 	debug("%s: number of textures %d, size %d", __FUNCTION__,
 	      (int)max_tex_units[0], (int)max_tex_sizes[0]);
+#endif
 	
 	if (vr->rounded) {
 		vr->use_mask = true;
@@ -503,7 +538,7 @@ static int renderer_init(struct video_renderer *vr)
 	}
   
 	if (!vr->program) {
-		warning("%s: Could not create program", __FUNCTION__);
+		//warning("%s: Could not create program", __FUNCTION__);
 		err = ENOSYS;
 		goto out;
 	}
@@ -645,8 +680,10 @@ static void setup_textures(struct video_renderer *vr, struct avs_vidframe *vf)
 	const GLsizei w = (GLsizei)vf->w;
 	const GLsizei h = (GLsizei)vf->h;
 
+#if 0
 	debug("%s: width %d, height %d rot=%d",
 	      __FUNCTION__, w, h, vf->rotation);
+#endif
 
 	vr->tex.w = vf->w;
 	vr->tex.h = vf->h;
@@ -713,6 +750,20 @@ void video_renderer_set_should_fill(struct video_renderer *vr,
 	}
 }
 
+void video_renderer_set_fill_ratio(struct video_renderer *vr,
+				   float fill_ratio)
+{
+	if (vr) {
+		vr->fill_ratio = fill_ratio;
+		vr->needs_recalc = true;
+	}
+}
+
+const char *video_renderer_userid(struct video_renderer *vr)
+{
+	return vr ? vr->userid : NULL;
+}
+
 #else
 
 
@@ -752,6 +803,16 @@ void *video_renderer_arg(struct video_renderer *vr)
 void video_renderer_set_should_fill(struct video_renderer *vr,
 				    bool should_fill)
 {
+}
+
+void video_renderer_set_fill_ratio(struct video_renderer *vr,
+				   float fill_ratio)
+{
+}
+
+const char *video_renderer_userid(struct video_renderer *vr)
+{
+	return NULL;
 }
 
 #endif

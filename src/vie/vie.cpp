@@ -56,7 +56,6 @@ static struct vidcodec vie_vidcodecv[NUM_CODECS] = {
 		.name = "VP8",
 		.variant = NULL,
 		.fmtp = NULL,
-		.has_rtp = true,
 
 		.enc_alloch   = vie_enc_alloc,
 		.enc_starth   = vie_capture_start,
@@ -82,7 +81,6 @@ static struct vidcodec vie_vidcodecv[NUM_CODECS] = {
 		.name = "rtx",
 		.variant = NULL,
 		.fmtp = NULL,
-		.has_rtp = true,
 
 		.enc_alloch   = NULL,
 		.enc_starth   = NULL,
@@ -212,10 +210,10 @@ int vie_init(struct list *vidcodecl)
 	return err;
 }
 
-void vie_set_video_handlers(flowmgr_video_state_change_h *state_change_h,
-	flowmgr_render_frame_h *render_frame_h,
-	flowmgr_video_size_h *size_h,
-	void *arg)
+void vie_set_video_handlers(vie_video_state_change_h *state_change_h,
+			    vie_render_frame_h *render_frame_h,
+			    vie_video_size_h *size_h,
+			    void *arg)
 {
 	vid_eng.state_change_h = state_change_h;
 	vid_eng.render_frame_h = render_frame_h;

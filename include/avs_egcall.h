@@ -31,11 +31,13 @@ enum egcall_state {
 #define EGCALL_REASON_NORMAL             0
 #define EGCALL_REASON_ANSWERED_ELSEWHERE 5
 #define EGCALL_REASON_STILL_ONGOING      7
+#define EGCALL_REASON_REJECTED          10
 
 struct egcall;
 
 typedef void (egcall_start_h)(uint32_t msg_time, const char *userid_sender,
-			      bool should_ring, void *arg);
+			      bool video, bool should_ring, void *arg);
+typedef void (egcall_answer_h)(void *arg);
 typedef void (egcall_leave_h)(int reason, uint32_t msg_time, void *arg);
 typedef void (egcall_group_changed_h)(void *arg);
 
@@ -48,41 +50,47 @@ int egcall_alloc(struct egcall **egcallp,
 		 const struct ecall_conf *conf,		 
 		 const char *convid,
 		 const char *userid_self,
-		 const char *clientid,
-		 ecall_transp_send_h *sendh,
-		 egcall_start_h *starth,
-		 ecall_media_estab_h *media_estabh,
-		 ecall_audio_estab_h *audio_estabh,
-		 egcall_group_changed_h *grp_chgh,
-		 egcall_leave_h *leaveh,
-		 egcall_close_h *closeh,
-		 egcall_metrics_h *metricsh,
-		 void *arg);
+		 const char *clientid);
 
-int egcall_set_turnserver(struct egcall *egcall,
-			  struct sa *addr,
+struct icall *egcall_get_icall(struct egcall* egcall);
+
+int egcall_set_turnserver(struct icall *icall,
+			  const struct sa *addr,
+			  int proto, bool secure,
 			  const char *username,
 			  const char *credential);
 
-int egcall_start(struct egcall *egcall);
+int egcall_add_turnserver(struct icall *icall,
+			  struct zapi_ice_server *srv);
 
-int egcall_answer(struct egcall *egcall);
+int egcall_start(struct icall *icall,
+		 enum icall_call_type call_type,
+		 bool audio_cbr,
+		 void *extcodec_arg);
 
-void egcall_end(struct egcall *egcall);
+int egcall_answer(struct icall *icall,
+		  enum icall_call_type call_type,
+		  bool audio_cbr,
+		  void *extcodec_arg);
 
-bool egcall_msg_recv(struct egcall* egcall,
+void egcall_end(struct icall *icall);
+
+int egcall_msg_recv(struct icall *icall,
 		     uint32_t curr_time,
 		     uint32_t msg_time,
 		     const char *userid_sender,
 		     const char *clientid_sender,
 		     struct econn_message *msg);
 
-int egcall_media_start(struct egcall *egcall);
-void egcall_media_stop(struct egcall *egcall);
+int egcall_media_start(struct icall *icall);
+void egcall_media_stop(struct icall *icall);
+
+int egcall_set_video_send_state(struct icall *icall, enum icall_vstate state);
 
 struct wcall_members;
-int egcall_get_members(struct wcall_members **mmp, struct egcall *egcall);
+int egcall_get_members(struct icall *icall, struct wcall_members **mmp);
 
-int egcall_debug(struct re_printf *pf, void *arg);
+int egcall_set_quality_interval(struct icall *icall, uint64_t interval);
 
+int egcall_debug(struct re_printf *pf, const struct icall *arg);
 

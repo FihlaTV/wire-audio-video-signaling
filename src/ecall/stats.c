@@ -20,15 +20,16 @@
 #include <string.h>
 #include <re.h>
 #include "avs_log.h"
+#include "avs_zapi.h"
 #include "avs_media.h"
 #include "avs_dce.h"
 #include "avs_uuid.h"
-#include "avs_zapi.h"
 #include "avs_turn.h"
 #include "avs_cert.h"
 #include "avs_msystem.h"
 #include "avs_econn.h"
 #include "avs_econn_fmt.h"
+#include "avs_icall.h"
 #include "avs_ecall.h"
 #include "avs_jzon.h"
 #include "avs_mediastats.h"
@@ -48,20 +49,28 @@ static bool stats_has_video(const struct mediaflow *mf)
 	return has_video;
 }
 
+static int round(int in, int round_to)
+{
+	int out = (in + (round_to >> 1))/round_to;
+	out = out * round_to;
+    
+	return out;
+}
 
 bool ecall_stats_prepare(struct ecall *ecall, struct json_object *jobj,
 			 int ecall_err)
 {
+	int err = 0;
+
 	if (!ecall)
 		return false;
 
 
-	if (!ecall->mf || !ecall->answered)
+	if (!ecall->mf)
 		return false;
 
 	bool ice = false;
 	bool dtls = false;
-	int err = 0;
 
 	dtls = mediaflow_dtls_ready(ecall->mf);
 	ice = mediaflow_ice_ready(ecall->mf);
@@ -71,16 +80,20 @@ bool ecall_stats_prepare(struct ecall *ecall, struct json_object *jobj,
 	json_object_object_add(jobj, "protocol-version",
 			       json_object_new_string(econn_proto_version));
 	bool is_group = ecall_get_conf_part(ecall) ? true : false;
-	json_object_object_add(jobj, "group", json_object_new_boolean(is_group));
+	json_object_object_add(jobj, "group",
+			       json_object_new_boolean(is_group));
+
+	err |= jzon_add_str(jobj, "direction",
+			       econn_dir_name(econn_current_dir(ecall->econn)));
+
+	json_object_object_add(jobj, "answered",
+			       json_object_new_boolean(ecall->answered));
     
-	err = jzon_add_int(jobj, "estab_time(ms)", ecall->call_estab_time);
-	if (err)
-		return false;
-	err = jzon_add_int(jobj, "setup_time(ms)", ecall->call_setup_time);
+	err = jzon_add_int(jobj, "estab_time(ms)", round(ecall->call_estab_time, 10));
 	if (err)
 		return false;
 	err = jzon_add_int(jobj, "audio_setup_time(ms)",
-			   ecall->audio_setup_time);
+			   round(ecall->audio_setup_time, 10));
 	if (err)
 		return false;
 
@@ -91,8 +104,8 @@ bool ecall_stats_prepare(struct ecall *ecall, struct json_object *jobj,
 	json_object_object_add(jobj, "video",
 		       json_object_new_boolean(stats_has_video(ecall->mf)));
 
-	err |= jzon_add_int(jobj, "media_time(ms)",
-			    mediaflow_get_media_time(ecall->mf));
+	err |= jzon_add_int(jobj, "media_time(s)",
+			    mediaflow_get_media_time(ecall->mf)/1000);
 
 	struct aucodec_stats *voe_stats = mediaflow_codec_stats(ecall->mf);
 	if (voe_stats) {
@@ -100,8 +113,8 @@ bool ecall_stats_prepare(struct ecall *ecall, struct json_object *jobj,
 				    voe_stats->in_vol.avg);
 		err |= jzon_add_int(jobj, "spk_vol(dB)",
 				    voe_stats->out_vol.avg);
-		err |= jzon_add_int(jobj, "avg_rtt", voe_stats->rtt.avg);
-		err |= jzon_add_int(jobj, "max_rtt", voe_stats->rtt.max);
+		err |= jzon_add_int(jobj, "avg_rtt", round(voe_stats->rtt.avg, 10));
+		err |= jzon_add_int(jobj, "max_rtt", round(voe_stats->rtt.max, 10));
 		err |= jzon_add_int(jobj, "avg_jb_loss",
 				    voe_stats->loss_d.avg);
 		err |= jzon_add_int(jobj, "max_jb_loss",
@@ -182,16 +195,25 @@ bool ecall_stats_prepare(struct ecall *ecall, struct json_object *jobj,
 	const struct mediaflow_stats *mf_stats =mediaflow_stats_get(ecall->mf);
 	if (mf_stats) {
 		err |= jzon_add_int(jobj, "turn_alloc",
-				    mf_stats->turn_alloc);
+				    round(mf_stats->turn_alloc, 10));
 		err |= jzon_add_int(jobj, "nat_estab",
-				    mf_stats->nat_estab);
+				    round(mf_stats->nat_estab, 10));
 		err |= jzon_add_int(jobj, "dtls_estab",
-				    mf_stats->dtls_estab);
+				    round(mf_stats->dtls_estab, 10));
 		if (err)
 			return false;
 	}
 
 	err |= jzon_add_int(jobj, "ecall_error", ecall_err);
+
+	/* Mediaflow details: */
+	err |= jzon_add_str(jobj, "local_cand", mediaflow_lcand_name(ecall->mf));
+	err |= jzon_add_str(jobj, "remote_cand", mediaflow_rcand_name(ecall->mf));
+	if (err)
+		return false;
+
+	err |= jzon_add_str(jobj, "crypto", "%H",
+			   mediaflow_cryptos_print, ecall->crypto);
 
 	return true;
 }

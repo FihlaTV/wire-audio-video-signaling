@@ -124,11 +124,14 @@ static int enc_alloc(struct auenc_state **aesp,
 		     auenc_rtp_h *rtph,
 		     auenc_rtcp_h *rtcph,
 		     auenc_err_h *errh,
+		     void *extcodec_arg,
 		     void *arg)
 {
 	struct auenc_state *aes;
 	int err = 0;
 
+	(void)extcodec_arg; /* Not an external codec */
+	
 	if (!aesp || !ac) {
 		return EINVAL;
 	}
@@ -159,11 +162,16 @@ static int enc_alloc(struct auenc_state **aesp,
 
 
 static int audummy_start(struct auenc_state *aes,
-		     struct media_ctx **mctxp)
+			 bool cbr,
+			 const struct aucodec_param *prm,
+			 struct media_ctx **mctxp)
 {
 	if (!aes || !mctxp)
 		return EINVAL;
 
+	(void)cbr;
+	(void)prm;
+	
 	if(audummy.force_error)
 		return EIO;
     
@@ -196,11 +204,14 @@ static int dec_alloc(struct audec_state **adsp,
 		     const char *fmtp,
 		     struct aucodec_param *prm,
 		     audec_err_h *errh,
+		     void *extcodec_arg,
 		     void *arg)
 {
 	struct audec_state *ads;
 	int err = 0;
 
+	(void)extcodec_arg; /* Not an external codec */
+	
 	if (!adsp || !ac)
 		return EINVAL;
 
@@ -257,7 +268,6 @@ static struct aucodec audummy_aucodecv[NUM_CODECS] = {
 		.srate     = 48000,
 		.ch        = 2,
 		.fmtp      = "stereo=0;sprop-stereo=0",
-		.has_rtp   = true,
 
 		.enc_alloc = enc_alloc,
 

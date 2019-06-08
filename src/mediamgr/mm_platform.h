@@ -27,14 +27,20 @@ struct mm;
 extern "C" {
 #endif
 
+struct mm_platform_start_rec {
+	mediamgr_start_rec_h *rech;
+	void *arg;
+};
+	
 int mm_platform_init(struct mm *mm, struct dict *sounds);
 int mm_platform_free(struct mm *mm);
 	
-void mm_platform_play_sound(struct sound *snd);
+void mm_platform_play_sound(struct sound *snd, bool sync, bool delayed);
 void mm_platform_pause_sound(struct sound *snd);
 void mm_platform_resume_sound(struct sound *snd);
 void mm_platform_stop_sound(struct sound *snd);
 bool mm_platform_is_sound_playing(struct sound *snd);
+void mm_platform_reset_sound(struct sound *snd);	
 
 /* Audio Routing */
 int mm_platform_enable_speaker(void);
@@ -43,7 +49,9 @@ int mm_platform_enable_earpiece(void);
 int mm_platform_enable_headset(void);
 	
 enum mediamgr_auplay mm_platform_get_route(void);
+void mm_platform_confirm_route(enum mediamgr_auplay route);
 
+	
 void mm_platform_registerMedia(struct dict *sounds,
 	const char *name,
 	void *mediaObj,
@@ -54,12 +62,17 @@ void mm_platform_registerMedia(struct dict *sounds,
 	bool is_call_media);
 	
 void mm_platform_unregisterMedia(struct dict *sounds, const char *name);
-		
+
+void mm_platform_incoming(void);
 void mm_platform_enter_call(void);
 void mm_platform_exit_call(void);
 
 void mm_platform_set_active(void);
-    
+
+
+void mm_platform_start_recording(struct mm_platform_start_rec *rec_elem);
+void mm_platform_stop_recording(void);
+	
 #ifdef __cplusplus__
 };
 #endif

@@ -76,15 +76,11 @@ static NSComparisonResult (^conferenceComparator)(id, id) =
 			return (NSComparisonResult)NSOrderedSame;	
         };
 
-static void video_state_change_h(enum flowmgr_video_receive_state state,
-	enum flowmgr_video_reason reason, void *arg);
-
-static int render_frame_h(struct avs_vidframe *frame, void *arg);
+static int render_frame_h(struct avs_vidframe * frame, const char *userid, void *arg);
 
 static void audio_state_change_h(enum flowmgr_audio_receive_state state, void *arg);
 
-static void video_size_h(int width, int height, void *arg);
-
+static void video_size_h(int width, int height, const char *userid, void *arg);
 
 @implementation AVSVideoCaptureDevice
 
@@ -135,12 +131,11 @@ static void video_size_h(int width, int height, void *arg);
 @interface AVSFlowManager() <AVSMediaManagerObserver>
 {
 	AVSCapturer *_capturer;
-	AVSVideoView *_videoView;
+	NSMutableArray *_videoViews;
+	NSLock *_viewLock;
 }
 
 - (void)mediaCategoryChanged:(NSString *)convId category:(enum AVSFlowManagerCategory)mcat;
-
-- (void)playbackRouteDidChangeInMediaManager:(AVSPlaybackRoute)play_back_route;
 
 - (void)applicationWillResignActive:(NSNotification *)notification;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
@@ -195,7 +190,7 @@ static NSString *mime2uti(const char *ctype)
 }
 
 
-static void log_handler(uint32_t lve, const char *msg)
+static void log_handler(uint32_t lve, const char *msg, void *arg)
 {
 
 #ifdef AVS_LOG_DEBUG
@@ -232,7 +227,7 @@ static void *avs_thread(void *arg)
 	/* Force the loading of wcall symbols! 
 	 * Can't this be done with a linker directive?
 	 */
-	wcall_get_members(NULL);
+	wcall_get_members(NULL, NULL);
 	
 	err = libre_init();
 	if (err) {
@@ -252,7 +247,7 @@ static void *avs_thread(void *arg)
 		return NULL;
 	}
 
-	err = flowmgr_init("voe", NULL, TLS_KEYTYPE_EC);
+	err = flowmgr_init("voe");
 	fmw.initialized = err == 0;
 	fmw.err = err;
 	if (err) {
@@ -308,87 +303,6 @@ static int req_handler(struct rr_resp *ctx,
 	});
 
 	return 0;
-}
-
-
-static void media_estab_handler(const char *convid, bool estab, void *arg)
-{
-	AVSFlowManager *fm = (__bridge AVSFlowManager *)arg;
-
-	debug("AVSFlowManager::media_estab_handler convid=%s estab=%d\n",
-	      convid, estab);
-
-	dispatch_async(DISPATCH_Q, ^{
-		[fm mediaEstablishedInConversation:avsString(convid)];
-	});
-}
-
-
-static void mcat_handler(const char *convid, enum flowmgr_mcat cat, void *arg)
-{
-	debug("AVSFlowManager::mcat_handler cat=%d\n", cat);
-    
-	AVSFlowManager *fm = (__bridge AVSFlowManager *)arg;
-    
-	bool hasActive;
-	bool hasMedia;
-	int err;
-
-	err = flowmgr_has_active(fm.flowManager, &hasActive);
-	err |= flowmgr_has_media(fm.flowManager, convid, &hasMedia);
-	if (err) {
-		warning("AVSFlowManager::mcat_handler media query failed\n");
-	}
-	
-	dispatch_async(DISPATCH_Q, ^{
-		if ( err ) {
-			[fm.delegate setFlowManagerActivityState:AVSFlowActivityStateInvalid];
-		}
-		else {
-			if ( hasActive ) {
-				[fm.delegate setFlowManagerActivityState:AVSFlowActivityStateCallActive];
-			}
-			else {
-				[fm.delegate setFlowManagerActivityState:AVSFlowActivityStateNoActivity];
-			}
-		}
-
-		[fm updateModeInConversation:avsString(convid) withCategory:(AVSFlowManagerCategory)cat];
-	 });
-}
-
-
-static void volume_handler(const char *convid, const char *userid,
-			   double input, double output, void *arg)
-{
-	AVSFlowManager *fm = (__bridge AVSFlowManager *)arg;
-
-	dispatch_async(DISPATCH_Q, ^{
-			[fm updateVolumeForUser:avsString(userid) inVol:input outVol:output inConversation:avsString(convid)];
-	});
-}
-
-
-static void conf_pos_handler(const char *convid, struct list *partl, void *arg)
-{
-	AVSFlowManager *fm = (__bridge AVSFlowManager *)arg;
-	NSMutableArray *arr;
-	struct le *le;
-
-	debug("conf_pos_handler: %d parts\n", (int)list_count(partl));
-	
-	arr = [NSMutableArray arrayWithCapacity:list_count(partl)];
-	LIST_FOREACH(partl, le) {
-		struct conf_part *cp = le->data;
-
-		[arr addObject:avsString(cp->uid)];
-	}
-
-	dispatch_async(DISPATCH_Q, ^{
-		debug("conf_pos_handler: dispatching conferenceParticipants\n");
-			
-		[fm conferenceParticipants:arr inConversation:avsString(convid)];
-	});	
 }
 
 
@@ -449,55 +363,6 @@ static inline enum log_level convert_logl(AVSFlowManagerLogLevel logLevel)
 }
 #endif
 
-
-static inline enum flowmgr_ausrc convert_ausrc(AVSFlowManagerAudioSource ausrc)
-{
-	switch(ausrc) {
-	case FLOMANAGER_AUDIO_SOURCE_INTMIC:
-		return FLOWMGR_AUSRC_INTMIC;
-		
-	case FLOMANAGER_AUDIO_SOURCE_EXTMIC:
-		return FLOWMGR_AUSRC_EXTMIC;
-		
-	case FLOMANAGER_AUDIO_SOURCE_HEADSET:
-		return FLOWMGR_AUSRC_HEADSET;
-		
-	case FLOMANAGER_AUDIO_SOURCE_BT:
-		return FLOWMGR_AUSRC_BT;
-
-	case FLOMANAGER_AUDIO_SOURCE_LINEIN:
-		return FLOWMGR_AUSRC_LINEIN;
-
-	case FLOMANAGER_AUDIO_SOURCE_SPDIF:
-		return FLOWMGR_AUSRC_SPDIF;
-	}
-}
-
-
-static inline enum flowmgr_auplay convert_auplay(AVSFlowManagerAudioPlay auplay)
-{
-	switch(auplay) {
-	case FLOWMANAGER_AUDIO_PLAY_EARPIECE:
-		return FLOWMGR_AUPLAY_EARPIECE;
-
-	case FLOWMANAGER_AUDIO_PLAY_SPEAKER:
-		return FLOWMGR_AUPLAY_SPEAKER;
-
-	case FLOWMANAGER_AUDIO_PLAY_HEADSET:
-		return FLOWMGR_AUPLAY_HEADSET;
-
-	case FLOWMANAGER_AUDIO_PLAY_BT:
-		return FLOWMGR_AUPLAY_BT;
-
-	case FLOWMANAGER_AUDIO_PLAY_LINEOUT:
-		return FLOWMGR_AUPLAY_LINEOUT;
-
-	case FLOWMANAGER_AUDIO_PLAY_SPDIF:
-		return FLOWMGR_AUPLAY_SPDIF;
-	}
-}
-
-
 @implementation AVSFlowManager
 
 
@@ -517,11 +382,8 @@ static inline enum flowmgr_auplay convert_auplay(AVSFlowManagerAudioPlay auplay)
 
 - (void)appendLogForConversation:(NSString *)convId message:(NSString *)msg
 {
-	const char *cid = [convId UTF8String];
-	const char *cmsg = [msg UTF8String];
 
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_append_convlog,
-			     self.flowManager, cid, cmsg);	
+	warning("NOT IMPLEMENTED: appendLogForConversation\n");
 }
 
 
@@ -569,22 +431,9 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
 	if (err)
 		return nil;
 
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_media_handlers, fm,
-			     mcat_handler, volume_handler,
-			     (__bridge void *)(self));
-
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_media_estab_handler, fm,
-			     media_estab_handler,
-			     (__bridge void *)(self));
-
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_conf_pos_handler, fm,
-			     conf_pos_handler, (__bridge void *)(self));
-    
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_video_handlers, fm,
-			     video_state_change_h,
-			     render_frame_h,
-			     video_size_h,
-			     (__bridge void *)(self));
+	wcall_set_video_handlers(render_frame_h,
+				 video_size_h,
+				 (__bridge void *)(self));
 
 	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_audio_state_handler, fm,
 			     audio_state_change_h,
@@ -598,6 +447,8 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
 
 		[AVSMediaManagerChangeNotification addObserver:self];
 		_AVSFlowManagerInstance = self;
+		_videoViews = [[NSMutableArray alloc] init];
+		_viewLock = [[NSLock alloc] init];
 
 #if TARGET_OS_IPHONE
 		[[NSNotificationCenter defaultCenter] addObserver:self
@@ -632,7 +483,8 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
         g_Fm = self;
         _AVSFlowManagerInstance = self;
 
-	_videoView = nil;
+	_videoViews = [[NSMutableArray alloc] init];
+	_viewLock = [[NSLock alloc] init];
         
         FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_start);
     }
@@ -651,7 +503,8 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
 		self.delegate = delegate;
 		g_Fm = self;
 		_AVSFlowManagerInstance = self;
-		_videoView = nil;
+		_videoViews = [[NSMutableArray alloc] init];
+		_viewLock = [[NSLock alloc] init];
 
 		FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_start);
 	}
@@ -677,7 +530,8 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
 	if ( self ) {
 		self.delegate = delegate;
 		_AVSFlowManagerInstance = self;
-		_videoView = nil;
+		_videoViews = [[NSMutableArray alloc] init];
+		_viewLock = [[NSLock alloc] init];
 		FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_start);
 	}
 
@@ -696,17 +550,6 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
 - (NSArray *)events 
 {
 	NSMutableArray *eventNames = [NSMutableArray array];
-	const char **evs;
-	int nevs;
-	int i;
-
-	evs = flowmgr_events(&nevs);
-	
-	for(i = 0; i < nevs; i++) {
-		NSString *str = avsString(evs[i]);
-        
-		[eventNames addObject:str];
-	}
 
 	return eventNames;
 }
@@ -718,157 +561,75 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
 			  content:(NSData *)content
 			  context:(void const *)ctx
 {
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_resp,
-			     self.flowManager,
-			     status,
-			     [reason UTF8String],
-			     [mtype UTF8String],
-			     (const char *)[content bytes],
-			     (size_t)[content length],
-			     (void *)ctx);
+	warning("NOT IMPLEMENTED: processResponseWithStatus\n");
 }
 
 
 - (BOOL)processEventWithMediaType:(NSString *)mtype
 	     content:(NSData *)content
 {
-	int err;
-	bool handled = false;
+	warning("NOT IMPLEMENTED: processEventWithMediaType\n");
 
-	FLOWMGR_MARSHAL_RET(fmw.tid, err, flowmgr_process_event,
-			    &handled,
-			    self.flowManager,
-			    [mtype UTF8String],
-			    (const char *)[content bytes],
-			    (size_t)[content length]);
-
-	return (BOOL)(err == 0 && handled);
+	return false;
 }
 
 
 - (BOOL)acquireFlows:(NSString *)convId
 {
-	const char *cid = [convId UTF8String];
-	int err;
+	warning("NOT IMPLEMENTED: acquireFlows\n");
 
-	debug("AVSFlowManager::acquireFlows: %s\n", cid);
-    
-	FLOWMGR_MARSHAL_RET(fmw.tid, err, flowmgr_acquire_flows, self.flowManager, cid, NULL, NULL, NULL);
-	// Use this when we want to use the networkQuality
-	//netq_handler, (__bridge void *)(self));
-
-	return err == 0;
+	return false;
 }
 
 
 - (void)releaseFlows:(NSString *)convId
 {
-	const char *cid = [convId UTF8String];
-	
-	debug("AVSFlowManager::releaseFlows: %s\n", cid);
-	
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_release_flows, self.flowManager, cid);
+	warning("NOT IMPLEMENTED: releaseFlows\n");
 }
 
 
 - (void)setActive:(NSString *)convId active:(BOOL)active
 {
-	const char *cid = [convId UTF8String];
-
-	debug("AVSFlowManager::setActive: %s active=%d\n", cid, active);
-    
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_active,
-			     self.flowManager, cid, active);
+	warning("NOT IMPLEMENTED: setActive\n");
 }
 
 
 - (void)addUser:(NSString *)convId userId:(NSString *)userId
 	   name:(NSString *)name
 {
-	const char *cid = [convId UTF8String];
-	const char *uid = [userId UTF8String];
-	const char *nm = [name UTF8String];
-
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_user_add,
-			     self.flowManager, cid, uid, nm);
-	
+	warning("NOT IMPLEMENTED: addUser\n");
 }
 
 
 - (void)setSelfUser:(NSString *)userId
 {
-	const char *uid = [userId UTF8String];
-
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_self_userid,
-			     self.flowManager, uid);
-	
+	warning("NOT IMPLEMENTED: setSelfUser\n");
 }
 
 
 - (void)refreshAccessToken:(NSString *)token type:(NSString *)type
 {
-	const char *tok = [token UTF8String];
-	const char *typ = [type UTF8String];
-
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_refresh_access_token,
-			     self.flowManager, tok, typ);
+	warning("NOT IMPLEMENTED: refreshAccessToken\n");
 }
 
 
 - (void)mediaCategoryChanged:(NSString *)convId category:(AVSFlowManagerCategory)cat
 {
-	const char *cid = [convId UTF8String];
-
-	debug("AVSFlowManager::mediaCategoryChanged: %s cat=%d\n", cid, cat);
-    
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_mcat_changed, self.flowManager, cid, (enum flowmgr_mcat)cat);
+	warning("NOT IMPLEMENTED: mediaCategoryChanged\n");
 }
 
 
 - (BOOL)isMediaEstablishedInConversation:(NSString *)convId
 {
-	const char *cid = [convId UTF8String];
-	int err;
-	bool estab;
-	
-	FLOWMGR_MARSHAL_RET(fmw.tid, err, flowmgr_has_media,
-			    self.flowManager, cid, &estab);
+	warning("NOT IMPLEMENTED: isMediaEstablishedInConversation\n");
 
-	debug("AVSFlowManager::isMediaEstablished %s estab=%d\n", cid, estab);
-    
-	
-	return (BOOL)estab;
+	return (BOOL)false;
 }	
 
 
 - (void)networkChanged
 {
-	info("AVSFlowManager::networkChanged\n");
-	
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_network_changed,
-			     self.flowManager);
-}
-
-
-- (int)ausrcChanged:(enum AVSFlowManagerAudioSource)audioSource
-{
-	enum flowmgr_ausrc ausrc = convert_ausrc(audioSource);
-	int err;
-
-	FLOWMGR_MARSHAL_RET(fmw.tid, err, flowmgr_ausrc_changed, self.flowManager, ausrc);
-
-	return err;
-}
-
-
-- (int)auplayChanged:(enum AVSFlowManagerAudioPlay)audioPlay
-{
-	enum flowmgr_auplay auplay = convert_auplay(audioPlay);
-	int err;
-
-	FLOWMGR_MARSHAL_RET(fmw.tid, err, flowmgr_auplay_changed, self.flowManager, auplay);
-
-	return err;
+	warning("NOT IMPLEMENTED: networkChanged\n");
 }
 
 
@@ -925,7 +686,7 @@ static AVSFlowManager *_AVSFlowManagerInstance = nil;
 			goto out;
 	}	
 
-	err = flowmgr_sort_participants(&partl);
+	err = ENOSYS;//flowmgr_sort_participants(&partl);
 	if (err)
 		goto out;
 
@@ -965,21 +726,13 @@ out:
 
 - (void)callInterruptionStartInConversation:(NSString *)convId
 {
-	const char *cid = [convId UTF8String];
-	int err;
-		
-	FLOWMGR_MARSHAL_RET(fmw.tid, err, flowmgr_interruption,
-			    self.flowManager, cid, true);	
+	warning("NOT IMPLEMENTED: callInterruptionStartInConversation\n");
 }
 
 
 - (void)callInterruptionEndInConversation:(NSString *)convId
 {
-	const char *cid = [convId UTF8String];
-	int err;
-		
-	FLOWMGR_MARSHAL_RET(fmw.tid, err, flowmgr_interruption,
-			    self.flowManager, cid, false);	
+	warning("NOT IMPLEMENTED: callInterruptionEndInConversation\n");
 }
 
 
@@ -1059,53 +812,21 @@ out:
 
 }
 
-- (void)playbackRouteDidChangeInMediaManager:(AVSPlaybackRoute)play_back_route
-{
-    AVSFlowManagerAudioPlay route = FLOWMANAGER_AUDIO_PLAY_SPEAKER;
-    
-    switch ( play_back_route ) {
-        case AVSPlaybackRouteBuiltIn:
-            route = FLOWMANAGER_AUDIO_PLAY_EARPIECE;
-            break;
-            
-        case AVSPlaybackRouteHeadset:
-            route = FLOWMANAGER_AUDIO_PLAY_HEADSET;
-            break;
-            
-        case AVSPlaybackRouteSpeaker:
-            route = FLOWMANAGER_AUDIO_PLAY_SPEAKER;
-            break;
-            
-        default:
-            break;
-    }
-    
-    //if ( self.collection.count ) { // SSJ think this is the only place the collection is used maybe remove
-        [self auplayChanged:route];
-    //}
-}
-
 - (void)setEnableLogging:(BOOL)enable
 {
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_enable_logging,
-			     self.flowManager, (bool)enable);
+	warning("NOT IMPLEMENTED: setEnableLogging\n");
 }
 
 
 - (void)setEnableMetrics:(BOOL)enable
 {
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_enable_metrics,
-			     self.flowManager, (bool)enable);
+	warning("NOT IMPLEMENTED: setEnableMetrics\n");
 }
-
 
 
 - (void)setSessionId:(NSString *)sessId forConversation:(NSString *)convId
 {
-	const char *sid = [sessId UTF8String];
-	const char *cid = [convId UTF8String];
-
-	FLOWMGR_MARSHAL_VOID(fmw.tid, flowmgr_set_sessid, self.flowManager, cid, sid);
+	warning("NOT IMPLEMENTED: setSessionId\n");
 }
 
 
@@ -1168,27 +889,55 @@ out:
 	[_capturer detachPreview: view];
 }
 
+- (void)startVideoCapture
+{
+	[_capturer startWithWidth: 640 Height: 480 MaxFps: 15];
+}
+
+- (void)stopVideoCapture
+{
+	[_capturer stop];
+}
+
 - (void)attachVideoView:(UIView *)view
 {
-	_videoView = (AVSVideoView*)view;
+	[_viewLock lock];
+	[_videoViews addObject: view];
+	[_viewLock unlock];
 }
 
 - (void)detachVideoView:(UIView *)view
 {
-	if (view == _videoView) {
-		_videoView = nil;
-	}
+	[_viewLock lock];
+	[_videoViews removeObject: view];
+	[_viewLock unlock];
 }
 
-- (BOOL)renderFrame:(struct avs_vidframe *)frame
+- (BOOL)renderFrame:(struct avs_vidframe *)frame forUser:(NSString *)userid
 {
 	BOOL sizeChanged = NO;
 	
 #if TARGET_OS_IPHONE
-	
-	if (_videoView) {
-		sizeChanged = [_videoView handleFrame:frame];
+	char userid_anon[ANON_ID_LEN];
+	BOOL found = NO;
+
+	[_viewLock lock];
+	for (unsigned int v = 0; v < _videoViews.count; v++) {
+		AVSVideoView *view = [_videoViews objectAtIndex: v];
+
+		if ([view.userid isEqualToString: userid]) {
+			sizeChanged |= [view handleFrame:frame];
+			found = YES;
+		}
 	}
+	[_viewLock unlock];
+
+	if (!found) {
+		warning("flowmgr: render_frame couldnt find renderer for frame "
+			"belonging to %s\n",
+			anon_id(userid_anon, [userid UTF8String]));
+	}
+
 #endif
 
 	return sizeChanged;
@@ -1230,7 +979,7 @@ out:
 
 - (int)setAudioEffect:(AVSAudioEffectType) effect
 {
-    int ret;
+    int ret=0;
     
     enum audio_effect effect_type = AUDIO_EFFECT_CHORUS_MIN;
     if (effect == AVSAudioEffectTypeChorusMin) {
@@ -1291,7 +1040,7 @@ out:
         effect_type = AUDIO_EFFECT_NONE;
     }
     
-    FLOWMGR_MARSHAL_RET(fmw.tid, ret, flowmgr_set_audio_effect, self.flowManager, effect_type);
+    //    FLOWMGR_MARSHAL_RET(fmw.tid, ret, flowmgr_set_audio_effect, self.flowManager, effect_type);
     
     return ret;
 }
@@ -1309,39 +1058,6 @@ static void avs_flow_manager_send_notification(NSString *name, id object)
 
 		[center postNotification: notification];
 	});
-}
-
-static void video_state_change_h(enum flowmgr_video_receive_state state,
-	enum flowmgr_video_reason reason, void *arg)
-{
-	(void)arg;
-
-	AVSFlowManagerVideoReceiveState st;
-	AVSFlowManagerVideoReason re;
-
-	switch(state) {
-		case FLOWMGR_VIDEO_RECEIVE_STARTED:
-			st = FLOWMANAGER_VIDEO_RECEIVE_STARTED;
-			break;
-
-		case FLOWMGR_VIDEO_RECEIVE_STOPPED:
-			st = FLOWMANAGER_VIDEO_RECEIVE_STOPPED;
-			break;
-	}
-
-	switch(reason) {
-		case FLOWMGR_VIDEO_NORMAL:
-			re = FLOWMANAGER_VIDEO_NORMAL;
-			break;
-
-		case FLOWMGR_VIDEO_BAD_CONNECTION:
-			re = FLOWMANAGER_VIDEO_BAD_CONNECTION;
-			break;
-	}
-
-	AVSVideoStateChangeInfo *info = [[AVSVideoStateChangeInfo alloc]
-		initWithState:st reason:re];
-	avs_flow_manager_send_notification(FlowManagerVideoReceiveStateNotification, info);
 }
 
 static void audio_state_change_h(enum flowmgr_audio_receive_state state,
@@ -1366,17 +1082,18 @@ static void audio_state_change_h(enum flowmgr_audio_receive_state state,
 	avs_flow_manager_send_notification(FlowManagerAudioReceiveStateNotification, info);
 }
 
-static void video_size_h(int width, int height, void *arg)
+static void video_size_h(int width, int height, const char *userid, void *arg)
 {
 	/* Send notification about video size change here ... */
 }
 
 
-static int render_frame_h(struct avs_vidframe *frame, void *arg)
+static int render_frame_h(struct avs_vidframe * frame, const char *userid, void *arg)
 {
 	BOOL sizeChanged;
+	NSString *uid = [NSString stringWithUTF8String: userid];
 
-	sizeChanged = [[AVSFlowManager getInstance] renderFrame:frame];
+	sizeChanged = [[AVSFlowManager getInstance] renderFrame:frame forUser:uid];
 
 	return sizeChanged ? ERANGE : 0;
 }

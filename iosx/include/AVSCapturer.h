@@ -21,7 +21,13 @@
 
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
-#import "AVSFlowManager.h"
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#else
+#import <Cocoa/Cocoa.h>
+typedef NSView UIView;
+#endif
+
 
 #ifndef AVS_EXPORT
 #define AVS_EXPORT __attribute__((visibility("default")))
@@ -37,7 +43,8 @@ typedef enum {
 }AVSCapturerState;
 
 
-AVS_EXPORT @interface AVSCapturer : NSObject<AVCaptureVideoDataOutputSampleBufferDelegate>
+AVS_EXPORT @interface AVSCapturer : NSObject<AVCaptureVideoDataOutputSampleBufferDelegate,
+	CALayerDelegate>
 
 - (id)init;
 - (int)startWithWidth:(uint32_t)width Height:(uint32_t)height MaxFps:(uint32_t)max_fps;
@@ -46,6 +53,8 @@ AVS_EXPORT @interface AVSCapturer : NSObject<AVCaptureVideoDataOutputSampleBuffe
 - (int)setCaptureDevice:(NSString*)devId;
 - (void)attachPreview:(UIView*)preview;
 - (void)detachPreview:(UIView*)preview;
+- (id<CAAction>)actionForLayer:(CALayer *)layer 
+                        forKey:(NSString *)event;
 
 @end
 

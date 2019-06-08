@@ -20,6 +20,9 @@
 #define AVS_MSYSTEM_H
 
 
+#include <pthread.h>
+
+
 struct msystem;
 
 
@@ -28,12 +31,11 @@ struct msystem_config {
 };
 
 int msystem_get(struct msystem **msysp, const char *msysname,
-		enum tls_keytype cert_type, struct msystem_config *config);
+		struct msystem_config *config);
 bool msystem_is_initialized(struct msystem *msys);
 struct tls *msystem_dtls(struct msystem *msys);
 struct list *msystem_aucodecl(struct msystem *msys);
 struct list *msystem_vidcodecl(struct msystem *msys);
-struct list *msystem_flows(struct msystem *msys);
 bool msystem_get_loopback(struct msystem *msys);
 bool msystem_get_privacy(struct msystem *msys);
 const char *msystem_get_interface(struct msystem *msys);
@@ -44,26 +46,37 @@ int  msystem_push(struct msystem *msys, int op, void *arg);
 bool msystem_is_using_voe(struct msystem *msys);
 void msystem_enable_loopback(struct msystem *msys, bool enable);
 void msystem_enable_privacy(struct msystem *msys, bool enable);
-void msystem_enable_cbr(struct msystem *msys, bool enable);
-bool msystem_have_cbr(const struct msystem *msys);
+void msystem_enable_kase(struct msystem *msys, bool enable);
+bool msystem_have_kase(const struct msystem *msys);
 void msystem_set_ifname(struct msystem *msys, const char *ifname);
 int  msystem_enable_datachannel(struct msystem *msys, bool enable);
 bool msystem_have_datachannel(const struct msystem *msys);
-struct call_config;
-int  msystem_set_call_config(struct msystem *msys, struct call_config *cfg);
-struct call_config *msystem_get_call_config(const struct msystem *msys);
 int msystem_update_conf_parts(struct list *partl);
+struct dnsc *msystem_dnsc(void);
+
 
 #define MAX_TURN_SERVERS 8
 
-struct msystem_turn_server {
-	struct sa srv;
-	char user[128];
-	char pass[128];
-};
 
-size_t msystem_get_turn_servers(struct msystem_turn_server **turnvp,
-			     struct msystem *msys);
+void msystem_set_tid(struct msystem *msys, pthread_t tid);
+void msystem_enter(struct msystem *msys);
+void msystem_leave(struct msystem *msys);
+
+void msystem_set_auplay(const char *dev);
+void msystem_stop_silencing(void);
+
+
+
+/*
+ * Device
+ */
+
+int  msystem_start_mic_file_playout(const char fileNameUTF8[1024], int fs);
+void msystem_stop_mic_file_playout(void);
+void msystem_set_bitrate(int rate_bps);
+void msystem_set_packet_size(int packet_size_ms);
+bool msystem_get_muted(void);
+void msystem_set_muted(bool muted);
 
 
 #endif

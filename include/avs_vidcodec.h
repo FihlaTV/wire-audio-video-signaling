@@ -50,13 +50,14 @@ typedef int (videnc_alloc_h)(struct videnc_state **vesp,
 			     videnc_rtp_h *rtph,
 			     videnc_rtcp_h *rtcph,
 			     videnc_err_h *errh,
+			     void *extcodec_arg,
 			     void *arg);
 
 
 typedef int (videnc_packet_h)(bool marker, const uint8_t *hdr, size_t hdr_len,
 			      const uint8_t *pld, size_t pld_len, void *arg);
 
-typedef int  (videnc_start_h)(struct videnc_state *ves);
+typedef int  (videnc_start_h)(struct videnc_state *ves, bool group_mode);
 typedef void (videnc_stop_h)(struct videnc_state *ves);
 typedef void (videnc_hold_h)(struct videnc_state *ves, bool hold);
 typedef uint32_t (videnc_bwalloc_h)(struct videnc_state *ves);
@@ -71,13 +72,14 @@ typedef int (viddec_alloc_h)(struct viddec_state **vdsp,
 			     struct sdp_media *sdpm,
 			     struct vidcodec_param *prm,
 			     viddec_err_h *errh,
+			     void *extcodec_arg,
 			     void *arg);
 
 typedef void (viddec_rtp_h)(struct viddec_state *vds,
 			    const uint8_t *pkt, size_t len);
 typedef void (viddec_rtcp_h)(struct viddec_state *vds,
 			     const uint8_t *pkt, size_t len);
-typedef int  (viddec_start_h)(struct viddec_state *vds);
+typedef int  (viddec_start_h)(struct viddec_state *vds, const char *userid_remote);
 typedef void (viddec_stop_h)(struct viddec_state *vds);
 typedef void (viddec_hold_h)(struct viddec_state *vds, bool hold);
 typedef int  (viddec_debug_h)(struct re_printf *pf,
@@ -87,11 +89,11 @@ typedef uint32_t (viddec_bwalloc_h)(struct viddec_state *vds);
 
 struct vidcodec {
 	struct le le;
+	struct le ext_le; /* member of external codec list */
 	const char *pt;
 	const char *name;
 	const char *variant;
 	const char *fmtp;
-	bool has_rtp;
 
 	videnc_alloc_h *enc_alloch;
 	videnc_start_h *enc_starth;

@@ -24,6 +24,7 @@ LOCAL_C_INCLUDES := ../build/android-armv7/include \
 		    ../mediaengine
 
 LOCAL_SRC_FILES := \
+		audio_effect.cc \
 		flow_manager.cc \
 		media_manager.cc \
 		video_renderer.cc
@@ -33,13 +34,12 @@ LOCAL_LDLIBS    := \
 		../build/android-armv7/lib/libavscore.a \
 		-lvpx \
 		-lusrsctp \
-		-lifaddrs \
 		-lre \
 		-lrew \
+		-lsodium \
 		-lssl \
 		-lcrypto \
 		-lcpufeatures \
-		-lbreakpad \
 		-llog -lz -lGLESv2 \
 		-latomic
 
@@ -51,6 +51,7 @@ LOCAL_LDLIBS    += \
 		-lvpx \
 		-lcpufeatures \
 		-lopus \
+		-lOpenSLES \
 		-llog
 
 LOCAL_LDLIBS	+= \

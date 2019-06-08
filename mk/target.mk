@@ -21,7 +21,6 @@
 #     AVS_OS=ios		AVS_ARCH=armv7
 #     				AVS_ARCH=armv7s
 #     				AVS_ARCH=arm64
-#     				AVS_ARCH=i386	(simulator)
 #     				AVS_ARCH=x86_64	(simulator)
 #     AVS_OS=osx		AVS_ARCH=x86_64
 #
@@ -152,7 +151,7 @@
 # Here's all the AVS_OS and AVS_ARCH values we support
 #
 ALL_AVS_OS := android ios linux osx
-ALL_AVS_ARCH := armv7 armv7s arm64 i386 x86_64
+ALL_AVS_ARCH := armv7 arm64 i386 x86_64
 
 
 # Start by auto-determining host system and arch.
@@ -189,7 +188,7 @@ ifeq ($(AVS_OS),linux)
 AVS_ARCH := $(HOST_ARCH)
 endif
 ifeq ($(AVS_OS),ios)
-AVS_ARCH := armv7
+AVS_ARCH := arm64
 endif
 ifeq ($(AVS_OS),osx)
 AVS_ARCH := x86_64
@@ -439,10 +438,7 @@ AVS_OS_FAMILY := darwin
 
 # SDK
 #
-ifeq ($(AVS_ARCH),i386)
-SDK := iphonesimulator
-HOST_OPTIONS := --host=arm-apple-darwin
-else ifeq ($(AVS_ARCH),x86_64)
+ifeq ($(AVS_ARCH),x86_64)
 SDK := iphonesimulator
 HOST_OPTIONS := --host=arm-apple-darwin
 else
@@ -468,6 +464,7 @@ CPPFLAGS += \
 	 -isysroot $(SDK_PATH) \
 	 -DCARBON_DEPRECATED=YES -DWEBRTC_POSIX -DWEBRTC_MAC -DWEBRTC_IOS \
 	 -DZETA_IOS_STEREO_PLAYOUT -DHAVE_GAI_STRERROR=1 \
+	 -DUSE_APPLE_COMMONCRYPTO \
 	 -DIPHONE -pipe -no-cpp-precomp
 LFLAGS	 += \
 	 -arch $(AVS_ARCH) \
@@ -549,6 +546,10 @@ LIBS += -lunwind
 endif
 
 ifeq ($(AVS_ARCH),armv7)
+LIBS += -lunwind
+endif
+
+ifeq ($(AVS_ARCH),armv7l)
 LIBS += -lunwind
 endif
 

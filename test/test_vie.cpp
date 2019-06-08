@@ -197,10 +197,9 @@ public:
 		++n_frame_sent;
 	}
 
-	static void video_state_change_handler(
-				enum flowmgr_video_receive_state state,
-				enum flowmgr_video_reason reason,
-				void *arg)
+	static void video_state_change_handler(const char *userid,
+					       enum vie_renderer_state state,
+					       void *arg)
 	{
 		Vie *test = static_cast<Vie *>(arg);
 
@@ -248,7 +247,7 @@ public:
 		}
 	}
 
-	static int render_frame_handler(struct avs_vidframe *frame, void *arg)
+	static int render_frame_handler(struct avs_vidframe *frame, const char *userid, void *arg)
 	{
 		render_frame(frame, arg);
 
@@ -260,8 +259,8 @@ protected:
 	struct list vidcodecl = LIST_INIT;
 	struct tmr tmr;
 	struct viddec_state *vds = nullptr;
-	enum flowmgr_video_receive_state last_state =
-		FLOWMGR_VIDEO_RECEIVE_STOPPED;
+	enum vie_renderer_state last_state =
+		VIE_RENDERER_STATE_STOPPED;
 
 	unsigned n_rtp = 0;
 	size_t n_rtp_bytes = 0;
@@ -312,7 +311,6 @@ TEST_F(Vie, encode_decode_loop)
 	//ASSERT_TRUE(vc->pt == NULL); XXX should be dynamic ?
 	ASSERT_STREQ("VP8", vc->name);
 	ASSERT_TRUE(vc->fmtp == NULL);
-	ASSERT_TRUE(vc->has_rtp);
 	ASSERT_TRUE(vc->data != NULL);
 
 	err = vc->enc_alloch(&ves,
@@ -324,6 +322,7 @@ TEST_F(Vie, encode_decode_loop)
 			     videnc_rtp_handler,
 			     videnc_rtcp_handler,
 			     videnc_err_handler,
+			     NULL,
 			     this);
 	ASSERT_EQ(0, err);
 	ASSERT_TRUE(ves != NULL);
@@ -337,15 +336,16 @@ TEST_F(Vie, encode_decode_loop)
 			     NULL,
 			     &param_dec,
 			     viddec_err_handler,
+			     NULL,
 			     this);
 	ASSERT_EQ(0, err);
 	ASSERT_TRUE(vds != NULL);
 	ASSERT_TRUE(mctx2 != NULL);
 
-	err = vc->enc_starth(ves);
+	err = vc->enc_starth(ves, false);
 	ASSERT_EQ(0, err);
 
-	err = vc->dec_starth(vds);
+	err = vc->dec_starth(vds, "A");
 	ASSERT_EQ(0, err);
 
 	vie_set_video_handlers(video_state_change_handler,
@@ -379,7 +379,7 @@ TEST_F(Vie, encode_decode_loop)
 	ASSERT_GE(n_rtcp, 1);
 	ASSERT_EQ(0, n_enc_err);
 	ASSERT_EQ(0, n_dec_err);
-	ASSERT_EQ(FLOWMGR_VIDEO_RECEIVE_STARTED, last_state);
+	ASSERT_EQ(VIE_RENDERER_STATE_RUNNING, last_state);
 
 	/* DONE */
 	mem_deref(ves);

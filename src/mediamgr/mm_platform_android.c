@@ -26,31 +26,36 @@
 #include <sys/time.h>
 
 static struct {
-    bool initialized;
-    int err;
-    JavaVM *vm;
-    jfieldID mmfid;
-    jobject ctx;
-    jclass mmClass;
-    jobject mm;
-    jmethodID mmOnPlaybackRouteChanged;
-    jmethodID mmOnMediaCategoryChanged;
-    jmethodID mmOnEnterCall;
-    jmethodID mmOnExitCall;
-    jclass arClass;
-    jmethodID arConstructor;
-    jmethodID arEnableSpeaker;
-    jmethodID arEnableHeadset;
-    jmethodID arEnableEarpiece;
-    jmethodID arEnableBTSco;
-    jmethodID arGetRoute;
-    jobject router;
-    jclass mpClass;
-    jmethodID mpPlay;
-    jmethodID mpStop;
-    jmethodID mpSetShouldLoop;
-    jmethodID mpSetVolumen;
-    jmethodID mpGetIsPlaying;
+	bool initialized;
+	int err;
+	struct tmr tmr_delay;	
+	struct mm *mediamgr;
+	JavaVM *vm;
+	jfieldID mmfid;
+	jobject ctx;
+	jclass mmClass;
+	jobject mm;
+	jmethodID mmOnPlaybackRouteChanged;
+	jmethodID mmOnMediaCategoryChanged;
+	jmethodID mmOnAudioFocus;
+	jmethodID mmOnEnterCall;
+	jmethodID mmOnExitCall;
+	jclass arClass;
+	jmethodID arConstructor;
+	jmethodID arEnableSpeaker;
+	jmethodID arEnableHeadset;
+	jmethodID arEnableEarpiece;
+	jmethodID arEnableBTSco;
+	jmethodID arGetRoute;
+	jmethodID arOnStartingCall;
+	jmethodID arOnStoppingCall;
+	jobject router;
+	jclass mpClass;
+	jmethodID mpPlay;
+	jmethodID mpStop;
+	jmethodID mpSetShouldLoop;
+	jmethodID mpSetVolumen;
+	jmethodID mpGetIsPlaying;
 } java = {
     .initialized = false,
     .err = 0,
@@ -124,35 +129,37 @@ static bool callBoolMethodHelper(JNIEnv * jEnv,
 
 static int jni_attach(struct jni_env *je)
 {
-    int res;
-    int err = 0;
+	int res;
+	int err = 0;
     
-    je->attached = false;
+	je->attached = false;
 
 	if (!java.vm)
 		return ENOSYS;
 
-    res = (*java.vm)->GetEnv(java.vm, (void **)&je->env, JNI_VERSION_1_6);
+	res = (*java.vm)->GetEnv(java.vm, (void **)&je->env, JNI_VERSION_1_6);
     
-    if (res != JNI_OK || je->env == NULL) {
+	if (res != JNI_OK || je->env == NULL) {
 #ifdef ANDROID
-        res = (*java.vm)->AttachCurrentThread(java.vm, &je->env, NULL);
+		res = (*java.vm)->AttachCurrentThread(java.vm, &je->env, NULL);
 #else
-        res = (*java.vm)->AttachCurrentThread(java.vm, (void **)&je->env, NULL);
+		res = (*java.vm)->AttachCurrentThread(java.vm,
+						      (void **)&je->env, NULL);
 #endif
         
-        if (res != JNI_OK) {
-            error("mm:GetAttachCurrentThread failed \n");
-            err = ENOSYS;
-            goto out;
-        }
-        je->attached = true;
-    }else {
-        debug("mm: GetEnv managed to get java env = %p \n", je->env);
-    }
-    
-out:
-    return err;
+		if (res != JNI_OK) {
+			error("mm:GetAttachCurrentThread failed \n");
+			err = ENOSYS;
+			goto out;
+		}
+		je->attached = true;
+	}
+	else {
+		debug("mm: GetEnv managed to get java env = %p \n", je->env);
+	}
+
+ out:
+	return err;
 }
 
 static void jni_detach(struct jni_env *je)
@@ -255,7 +262,12 @@ int mm_android_jni_init(JNIEnv *env, jobject jobj, jobject ctx)
         error("mm: Could not get onMediaCategoryChanged method ID \n");
     }
     java.mmOnMediaCategoryChanged = jmObject;
-    
+
+    if ((jmObject= (*env)->GetMethodID(env, cls, "onAudioFocus", "()V")) == NULL){
+        error("mm: Could not get onAudioFocus method ID \n");
+    }
+    java.mmOnAudioFocus = jmObject;
+
     if ((jmObject= (*env)->GetMethodID(env, cls, "onEnterCall", "()V")) == NULL){
         error("mm: Could not get onEnterCall method ID \n");
     }
@@ -273,7 +285,7 @@ int mm_android_jni_init(JNIEnv *env, jobject jobj, jobject ctx)
     }
     java.mpClass = (jclass)((*env)->NewGlobalRef(env, jcObject));
 
-    if ((jmObject= (*env)->GetMethodID(env, jcObject, "play", "()V")) == NULL){
+    if ((jmObject= (*env)->GetMethodID(env, jcObject, "play", "(Z)V")) == NULL){
         error("mm: Could not get play method ID \n");
     }
     java.mpPlay = jmObject;
@@ -337,6 +349,16 @@ int mm_android_jni_init(JNIEnv *env, jobject jobj, jobject ctx)
         error("mm: Could not get GetAudioRoute method ID \n");
     }
     java.arGetRoute = jmObject;
+
+    if ((jmObject= (*env)->GetMethodID(env, jcObject, "OnStartingCall", "()V")) == NULL){
+        error("mm: Could not get OnStartingCall method ID \n");
+    }
+    java.arOnStartingCall = jmObject;
+
+    if ((jmObject= (*env)->GetMethodID(env, jcObject, "OnStoppingCall", "()V")) == NULL){
+        error("mm: Could not get OnStoppingCall method ID \n");
+    }
+    java.arOnStoppingCall = jmObject;
     
     java.initialized = true;
     
@@ -361,26 +383,41 @@ void mm_android_jni_cleanup(JNIEnv *env, jobject jobj){
 
 static void jni_create_router(struct mm *mm)
 {
-    struct jni_env jni_env;
-    
-    if(jni_attach(&jni_env)){
-        error("mm: %s jni_attach failed !! \n", __FUNCTION__);
-        return;
-    }
-    jobject jrouter = cbgp_jni_new( jni_env.env, java.arClass, java.arConstructor, "(Landroid/content/Context;)V", java.ctx, (jlong)mm);
-    java.router = (*jni_env.env)->NewGlobalRef(jni_env.env, jrouter);
-    debug("mm: jni_create_router called !! \n");
-    
-    jni_detach(&jni_env);
+	struct jni_env jni_env;
+	jobject jrouter;
+	int err;
+
+	info("mm_platform_android: jni_create_router: router=%p\n", java.router);
+
+	if (java.router)
+		return;
+	
+	err = jni_attach(&jni_env);
+	if (err) { 
+		error("mediamgr_platform_android: jni_create_router: "
+		      "attach failed\n");
+		return;
+	}
+
+	jrouter = cbgp_jni_new(jni_env.env, java.arClass, java.arConstructor,
+			       "(Landroid/content/Context;)V",
+			       java.ctx, (jlong)mm);
+	java.router = (*jni_env.env)->NewGlobalRef(jni_env.env, jrouter);
+	java.mediamgr = mm;
+
+	jni_detach(&jni_env);
+
+	info("mm_platform_android: jni_create_router: jrouter=%p "
+	     "java.router=%p mm=%p\n", jrouter, java.router, java.mediamgr);	
 }
 
 static void jni_free_router(struct mm *mm)
 {
     struct jni_env jni_env;
     
-    if(jni_attach(&jni_env)){
-        error("mm: %s jni_attach failed !! \n", __FUNCTION__);
-        return;
+    if (jni_attach(&jni_env)) {
+	    error("mm_platform_android: jni_free_router: jni_attach failed\n");
+	    return;
     }
     
     (*jni_env.env)->DeleteGlobalRef(jni_env.env, java.router);
@@ -390,9 +427,15 @@ static void jni_free_router(struct mm *mm)
 
 int mm_platform_init(struct mm *mm, struct dict *sounds)
 {
-    jni_create_router(mm);
+	info("mm_platform_android: init: mm=%p sounds=%p\n", mm, sounds);
+
+	tmr_init(&java.tmr_delay);
+	
+	jni_create_router(mm);
     
-    dict_flush(sounds);
+	dict_flush(sounds);
+
+	mediamgr_device_changed(mm);
     
 	return 0;
 }
@@ -413,11 +456,13 @@ void mm_platform_registerMedia(struct dict *sounds,
                                int priority,
                                bool is_call_media)
 {
-    debug("mm: mm_platform_registerMedia name = %s \n", name);
-    
     struct sound *snd;
+
+    info("mm_platform_android: registerMedia name=%s\n", name);
+        
     snd = mem_zalloc(sizeof(struct sound), NULL);
-    
+
+    str_dup(&snd->name, name);
     snd->arg = mediaObj;
     snd->mixing = mixing;
     snd->incall = incall;
@@ -425,28 +470,27 @@ void mm_platform_registerMedia(struct dict *sounds,
     snd->priority = priority;
     snd->is_call_media = is_call_media;
     
-    dict_add( sounds, name, (void*)snd);
-    mem_deref(snd); // to get the ref count to 1
+    dict_add(sounds, name, (void*)snd);
+    /* snd is now owned by dictionary */
+    mem_deref(snd);
 }
 
-void mm_platform_unregisterMedia(struct dict *sounds, const char *name){
+void mm_platform_unregisterMedia(struct dict *sounds, const char *name)
+{
     struct sound *snd;
-
-    debug("mm: mm_platform_unregisterMedia = %s \n", name);
-    
-    snd = dict_lookup(sounds, name);
-    if(!snd){
-        return;
-    }
-    
     struct jni_env jni_env;
+
+    info("mm_platform_android: unregisterMedia: name=%s\n", name);
+    
+    snd = dict_lookup(sounds, name);
+    if (!snd)
+	    return;
+    
     if(jni_attach(&jni_env)){
-        error("mm: %s jni_attach failed !! \n", __FUNCTION__);
+        error("mm: %s jni_attach failed\n", __FUNCTION__);
         return;
     }
 
-    snd = dict_lookup(sounds, name);
-    
     (*jni_env.env)->DeleteGlobalRef(jni_env.env, (jobject)snd->arg);
     
     dict_remove(sounds, name);
@@ -454,20 +498,33 @@ void mm_platform_unregisterMedia(struct dict *sounds, const char *name){
     jni_detach(&jni_env);
 }
 
-void mm_platform_play_sound(struct sound *snd)
+void mm_platform_play_sound(struct sound *snd, bool sync, bool delayed)
 {
-    debug("mm: mm_platform_play_sound obj = %p \n", (void*)snd->arg);
-    
     jobject java_player = (jobject)snd->arg;
+    jboolean jsync = sync ? JNI_TRUE : JNI_FALSE;
     struct jni_env jni_env;
+    int err;
+
+    (void)delayed;
     
-    if(jni_attach(&jni_env)){
-        error("mm: %s jni_attach failed !! \n", __FUNCTION__);
-        return;
+    info("mm_platform_android: play_sound: name=%s obj=%p\n",
+	 snd->name, (void*)snd->arg); 
+
+    info("mm_platform_android: JNI play(sync=%s) called "
+	 "java_player=%p mpPlay=%p\n",
+	 sync ? "yes" : "no",
+	 java_player, java.mpPlay);
+
+    
+    err = jni_attach(&jni_env);
+    if (err) {
+	    error("mm_platform_android: play_sound jni_attach failed\n");
+	    return;
     }
-    callVoidMethodHelper(jni_env.env, java_player, java.mpPlay);
-    
+    callVoidMethodHelper(jni_env.env, java_player, java.mpPlay, jsync);
     jni_detach(&jni_env);
+
+    info("mm_platform_android: JNI play done\n");    
 }
 
 void mm_platform_pause_sound(struct sound *snd)
@@ -508,21 +565,33 @@ bool mm_platform_is_sound_playing(struct sound *snd)
     return ret;
 }
 
-int mm_platform_enable_speaker(void){
-    debug("mm: mm_platform_enable_speaker() \n");
 
+static int mm_platform_enable_speaker_internal(bool notify)
+{
     struct jni_env jni_env;
+
+    info("mm_platform_android: enable_speaker()\n");
     
     if(jni_attach(&jni_env)){
         error("mm: %s jni_attach failed !! \n", __FUNCTION__);
         return -1;
     }
-    int ret = callIntMethodHelper(jni_env.env, java.router, java.arEnableSpeaker);
+    int ret = callIntMethodHelper(jni_env.env, java.router,
+				  java.arEnableSpeaker);
     
     jni_detach(&jni_env);
+
+    if (notify)
+	    mediamgr_device_changed(java.mediamgr);
     
     return ret;
 }
+
+int mm_platform_enable_speaker(void)
+{
+	return mm_platform_enable_speaker_internal(true);
+}
+
 
 int mm_platform_enable_headset(void){
     debug("mm: mm_platform_enable_headset() \n");
@@ -533,9 +602,12 @@ int mm_platform_enable_headset(void){
         error("mm: %s jni_attach failed !! \n", __FUNCTION__);
         return -1;
     }
-    int ret = callIntMethodHelper(jni_env.env, java.router, java.arEnableHeadset);
+    int ret = callIntMethodHelper(jni_env.env, java.router,
+				  java.arEnableHeadset);
     
     jni_detach(&jni_env);
+
+    mediamgr_device_changed(java.mediamgr);
     
     return ret;
 }
@@ -544,38 +616,66 @@ int mm_platform_enable_earpiece(void){
     debug("mm: mm_platform_enable_earpiece() \n");
     
     struct jni_env jni_env;
-    
+    enum mediamgr_auplay old_route;
+    enum mediamgr_auplay route;
+    int ret;    
+
+    old_route = mm_platform_get_route();
     if(jni_attach(&jni_env)){
         error("mm: %s jni_attach failed !! \n", __FUNCTION__);
         return -1;
     }
-    int ret = callIntMethodHelper(jni_env.env, java.router, java.arEnableEarpiece);
+    ret = callIntMethodHelper(jni_env.env, java.router, java.arEnableEarpiece);
     
     jni_detach(&jni_env);
     
+    route = mm_platform_get_route();
+    if (ret == 0 && route != old_route)
+	    mediamgr_device_changed(java.mediamgr);
+    else {
+	    warning("mm_platform_android: cannot switch to earpiece, "
+		    "forcing speaker\n");
+	    ret = mm_platform_enable_speaker_internal(false);
+    }
+
     return ret;
 }
 
-int mm_platform_enable_bt_sco(void){
+
+static void enable_bt_handler(void *arg)
+{
+	struct jni_env jni_env;
+	
+	if(jni_attach(&jni_env)){
+		error("mm_platform_android: %s jni_attach failed\n",
+		      __FUNCTION__);
+		return;
+	}
+	int ret = callIntMethodHelper(jni_env.env, java.router,
+				      java.arEnableBTSco);
+    
+	jni_detach(&jni_env);
+    
+	if (ret == 0)
+		mediamgr_device_changed(java.mediamgr);
+}
+
+int mm_platform_enable_bt_sco(void)
+{
     debug("mm: mm_platform_enable_bt_sco() \n");
-    
-    struct jni_env jni_env;
-    
+
+    tmr_start(&java.tmr_delay, 1000, enable_bt_handler, NULL);
+
+    return 0;
+
+#if 0
     // Android Hack wait 500 ms otherwise we will turn on too early if the BT device was just connected
     struct timespec t;
     t.tv_sec = 0;
     t.tv_nsec = 500 * 1000 * 1000;
     nanosleep(&t, NULL);
+#endif
     
-    if(jni_attach(&jni_env)){
-        error("mm: %s jni_attach failed !! \n", __FUNCTION__);
-        return -1;
-    }
-    int ret = callIntMethodHelper(jni_env.env, java.router, java.arEnableBTSco);
-    
-    jni_detach(&jni_env);
-    
-    return ret;
 }
 
 void mm_android_jni_on_playback_route_changed(enum mediamgr_auplay new_route, void *arg){
@@ -612,32 +712,69 @@ void mm_android_jni_on_media_category_changed(enum mediamgr_state state, void *a
     jni_detach(&jni_env);
 }
 
-void mm_platform_enter_call(void){
-    debug("mm: mm_platform_enter_call() \n");
-    
+static void audio_focus(void)
+{
     struct jni_env jni_env;
     
-    if(jni_attach(&jni_env)){
-        error("mm: %s jni_attach failed !! \n", __FUNCTION__);
-        return;
+    debug("mm_platform_android: audio_focus\n");
+    
+    if(jni_attach(&jni_env)) {
+	    error("mm_platform_android: audio_focus attach failed\n");
+	    return;
     }
-    callVoidMethodHelper(jni_env.env, java.mm, java.mmOnEnterCall);
+    (*jni_env.env)->CallVoidMethod(jni_env.env, java.mm,
+				   java.mmOnAudioFocus);
     
     jni_detach(&jni_env);
 }
 
-void mm_platform_exit_call(void){
-    debug("mm: mm_platform_exit_call() \n");
-    
+static void enter_call(void)
+{
     struct jni_env jni_env;
     
-    if(jni_attach(&jni_env)){
-        error("mm: %s jni_attach failed !! \n", __FUNCTION__);
-        return;
+    debug("mm_platform_android: enter_call\n");
+    
+    if(jni_attach(&jni_env)) {
+	    error("mm_platform_android: enter_call attach failed\n");
+	    return;
     }
-    callVoidMethodHelper(jni_env.env, java.mm, java.mmOnExitCall);
+    (*jni_env.env)->CallVoidMethod(jni_env.env, java.router, java.arOnStartingCall);    
+    callVoidMethodHelper(jni_env.env, java.mm, java.mmOnEnterCall);
     
     jni_detach(&jni_env);
+
+}
+
+void mm_platform_incoming(void)
+{
+	audio_focus();
+	mediamgr_sys_incoming(java.mediamgr);
+}
+
+void mm_platform_enter_call(void)
+{
+	enter_call();
+	mediamgr_sys_entered_call(java.mediamgr);    
+}
+
+void mm_platform_exit_call(void)
+{
+	debug("mm_platform_android: exit_call\n");
+
+	tmr_cancel(&java.tmr_delay);
+	
+	struct jni_env jni_env;
+    
+	if(jni_attach(&jni_env)){
+		error("mm: %s jni_attach failed !! \n", __FUNCTION__);
+		return;
+	}
+	callVoidMethodHelper(jni_env.env, java.mm, java.mmOnExitCall);
+	(*jni_env.env)->CallVoidMethod(jni_env.env, java.router, java.arOnStoppingCall);
+    
+	jni_detach(&jni_env);
+
+	mediamgr_sys_left_call(java.mediamgr);
 }
 
 void mm_platform_set_active(void){
@@ -683,4 +820,27 @@ enum mediamgr_auplay mm_platform_get_route(void){
     }
     
     return route;
+}
+
+
+void mm_platform_reset_sound(struct sound *snd)
+{
+	(void)snd;
+}
+
+
+void mm_platform_start_recording(struct mm_platform_start_rec *rec_elem)
+{
+}
+
+
+void mm_platform_stop_recording(void)
+{
+}
+
+void mm_platform_confirm_route(enum mediamgr_auplay route)
+{
+	if (route == MEDIAMGR_AUPLAY_SPEAKER)
+		mm_platform_enable_speaker_internal(false);
+
 }

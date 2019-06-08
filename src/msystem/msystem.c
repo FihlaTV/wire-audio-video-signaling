@@ -16,21 +16,26 @@
 * along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <pthread.h>
+
 #include "re.h"
 #include "avs.h"
+#include "avs_extcodec.h"
 #include "avs_voe.h"
 #include "avs_vie.h"
 
-struct msystem {
-	struct msystem_config config;
-	struct call_config *call_config;
+#ifdef __APPLE__
+#       include <TargetConditionals.h>
+#endif
 
-	/* Turn servers derived from calls config */
-	struct msystem_turn_server *turnv;
-	size_t turnc;
+struct msystem {
+	pthread_t tid;
+
+	struct msystem_config config;
 	
 	bool inited;
 	bool started;
+	struct dnsc *dnsc;
 	struct tls *dtls;
 	struct mqueue *mq;
 	struct tmr vol_tmr;
@@ -38,7 +43,7 @@ struct msystem {
 	bool using_voe;
 	bool loopback;
 	bool privacy;
-	bool cbr;
+	bool crypto_kase;
 	char ifname[256];
 
 	struct list aucodecl;
@@ -82,6 +87,10 @@ static void msystem_destructor(void *data)
 	if (msys->name) {
 		if (streq(msys->name, "audummy"))
 			audummy_close();
+		else if (streq(msys->name, "extcodec")) {
+			extcodec_audio_close();
+			extcodec_video_close();
+		}
 		else if (streq(msys->name, "voe")) {
 			vie_close();
 			voe_close();
@@ -93,9 +102,7 @@ static void msystem_destructor(void *data)
 	msys->mq = mem_deref(msys->mq);
 	msys->dtls = mem_deref(msys->dtls);
 	msys->name = mem_deref(msys->name);
-	msys->call_config = mem_deref(msys->call_config);
-	msys->turnc = 0;
-	msys->turnv = mem_deref(msys->turnv);
+	msys->dnsc = mem_deref(msys->dnsc);
 	
 	dce_close();
 
@@ -116,7 +123,6 @@ static void wakeup_handler(int id, void *data, void *arg)
 
 
 static int msystem_init(struct msystem **msysp, const char *msysname,
-			enum tls_keytype cert_type,
 			struct msystem_config *config)
 {
 	struct msystem *msys;
@@ -151,40 +157,26 @@ static int msystem_init(struct msystem **msysp, const char *msysname,
 	if (err)
 		goto out;
 
-	{
-		uint64_t t1, t2;
-
-		t1 = tmr_jiffies();
-
-		switch (cert_type) {
-
-		case TLS_KEYTYPE_EC:
-			info("flowmgr: generating ECDSA certificate\n");
-			err = cert_tls_set_selfsigned_ecdsa(msys->dtls,
-							    "prime256v1");
-			if (err) {
-				warning("flowmgr: failed to generate ECDSA"
-					" certificate"
-					" (%m)\n", err);
-				goto out;
-			}
-			break;
-
-		default:
-			warning("flowmgr: invalid cert type\n");
-			err = ENOTSUP;
-			goto out;
-		}
-
-		t2 = tmr_jiffies();
-
-		info("flowmgr: generate certificate took %d ms\n",
-		     (int)(t2-t1));
+	info("msystem: generating ECDSA certificate\n");
+	err = cert_tls_set_selfsigned_ecdsa(msys->dtls, "prime256v1");
+	if (err) {
+		warning("msystem: failed to generate ECDSA"
+			" certificate"
+			" (%m)\n", err);
+		goto out;
 	}
 
 	tls_set_verify_client(msys->dtls);
 
-	err = tls_set_srtp(msys->dtls, "SRTP_AES128_CM_SHA1_80");
+	err = tls_set_srtp(msys->dtls,
+#ifndef USE_APPLE_COMMONCRYPTO
+			   "SRTP_AEAD_AES_256_GCM:"
+			   "SRTP_AEAD_AES_128_GCM:"
+#endif
+			   "SRTP_AES128_CM_SHA1_80");
+#if 0 /* Chrome has disabled this, but still has it in neogtiation */
+	"SRTP_AES128_CM_SHA1_32");
+#endif
 	if (err) {
 		warning("flowmgr: failed to enable SRTP profile (%m)\n",
 			err);
@@ -193,9 +185,24 @@ static int msystem_init(struct msystem **msysp, const char *msysname,
 
 	tmr_init(&msys->vol_tmr);
 
+	info("msystem: initializing for msys: %s\n", msysname);
+	
 	err = str_dup(&msys->name, msysname);
 	if (streq(msys->name, "audummy"))
 		err = audummy_init(&msys->aucodecl);
+	else if (streq(msys->name, "extcodec")) {
+		err = extcodec_audio_init(&msys->aucodecl);
+		if (err) {
+			warning("msystem: extcodec audio init failed (%m)\n",
+				err);
+			goto out;
+		}
+		err = extcodec_video_init(&msys->vidcodecl);
+		if (err) {
+			warning("flowmgr: vie init failed (%m)\n", err);
+			goto out;
+		}
+	}
 	else if (streq(msys->name, "voe")) {
 		err = voe_init(&msys->aucodecl);
 		if (err) {
@@ -248,7 +255,7 @@ static int msystem_init(struct msystem **msysp, const char *msysname,
 
 
 int msystem_get(struct msystem **msysp, const char *msysname,
-		enum tls_keytype cert_type, struct msystem_config *config)
+		struct msystem_config *config)
 {
 	if (!msysp)
 		return EINVAL;
@@ -258,11 +265,56 @@ int msystem_get(struct msystem **msysp, const char *msysname,
 		return 0;
 	}
 
-
-	return msystem_init(msysp, msysname, cert_type, config);
+	return msystem_init(msysp, msysname, config);
 }
 
 
+void msystem_set_tid(struct msystem *msys, pthread_t tid)
+{
+	info("msystem: setting tid to: %p\n", tid);
+	
+	if (msys)
+		msys->tid = tid;
+}
+
+static bool tid_isset(struct msystem *msys)
+{
+	pthread_t tid;
+
+	memset(&tid, 0, sizeof(tid));
+
+	return !pthread_equal(tid, msys->tid);
+}
+
+void msystem_enter(struct msystem *msys)
+{
+	if (!msys)
+		return;
+
+	if (!tid_isset(msys)) {
+		warning("msystem: enter: tid not set!\n");
+		return;
+	}
+	
+	if (!pthread_equal(pthread_self(), msys->tid))
+		re_thread_enter();
+}
+
+
+void msystem_leave(struct msystem *msys)
+{
+	if (!msys)
+		return;
+
+	if (!tid_isset(msys)) {
+		warning("msystem: leave: tid not set!\n");
+		return;
+	}
+	
+	if (!pthread_equal(pthread_self(), msys->tid))
+		re_thread_leave();
+}
+	
 
 struct tls *msystem_dtls(struct msystem *msys)
 {
@@ -356,20 +408,21 @@ void msystem_enable_privacy(struct msystem *msys, bool enable)
 	msys->privacy = enable;	
 }
 
-void msystem_enable_cbr(struct msystem *msys, bool enable)
+
+void msystem_enable_kase(struct msystem *msys, bool enable)
 {
 	if (!msys)
 		return;
-    
-	voe_enable_cbr(enable);
-    
-	msys->cbr = enable;
+
+	msys->crypto_kase = enable;
 }
 
-bool msystem_have_cbr(const struct msystem *msys)
+
+bool msystem_have_kase(const struct msystem *msys)
 {
-	return msys ? voe_have_cbr() : false;
+	return msys ? msys->crypto_kase : false;
 }
+
 
 void msystem_set_ifname(struct msystem *msys, const char *ifname)
 {
@@ -415,84 +468,6 @@ bool msystem_have_datachannel(const struct msystem *msys)
 }
 
 
-int msystem_set_call_config(struct msystem *msys, struct call_config *cfg)
-{
-	size_t i;
-	int err;
-
-	if (!msys || !cfg)
-		return EINVAL;
-
-	msys->call_config = mem_deref(msys->call_config);	
-	msys->call_config = mem_zalloc(sizeof(*cfg), NULL);
-	if (!msys->call_config)
-		return ENOMEM;
-
-	*msys->call_config = *cfg;
-
-	msys->turnc = cfg->iceserverc;
-	msys->turnv = mem_deref(msys->turnv);
-	msys->turnv = mem_zalloc(msys->turnc * sizeof(*(msys->turnv)), NULL);
-
-	for (i = 0; i < cfg->iceserverc; ++i) {
-		struct zapi_ice_server *srv = &cfg->iceserverv[i];
-		struct uri uri;
-		struct pl pl_uri;
-		
-		pl_set_str(&pl_uri, srv->url);
-		err = uri_decode(&uri, &pl_uri);
-		if (err) {
-			warning("cannot decode URI (%r)\n", &pl_uri);
-			goto out;
-		}
-
-		if (0 == pl_strcasecmp(&uri.scheme, "turn")) {
-			struct msystem_turn_server *ts = &msys->turnv[i];
-			
-			err = sa_set(&ts->srv, &uri.host, uri.port);
-			if (err)
-				goto out;
-
-			str_ncpy(ts->user, srv->username, sizeof(ts->user));
-			str_ncpy(ts->pass, srv->credential, sizeof(ts->pass));
-		}
-		else {
-			warning("msystem: get_turn_servers: unknown URI scheme"
-				" '%r'\n", &uri.scheme);
-			err = ENOTSUP;
-			goto out;
-		}
-	}
-
- out:
-	if (err) {
-		msys->turnv = mem_deref(msys->turnv);
-		msys->turnc = 0;
-	}
-	
-	return err;
-}
-
-
-size_t msystem_get_turn_servers(struct msystem_turn_server **turnvp,
-				struct msystem *msys)
-					     
-{
-	if (!msys || !turnvp)
-		return 0;
-	else {
-		*turnvp = msys->turnv;
-		return msys->turnc;
-	}
-}
-
-
-struct call_config *msystem_get_call_config(const struct msystem *msys)
-{
-	return msys ? msys->call_config : NULL;
-}
-
-
 int msystem_update_conf_parts(struct list *partl)
 {
 	const struct audec_state **adsv;
@@ -519,3 +494,50 @@ int msystem_update_conf_parts(struct list *partl)
 	return 0;
 }
 
+void msystem_set_auplay(const char *dev)
+{
+	if (!g_msys)
+		return;
+
+	if (streq(g_msys->name, "voe")) {
+		voe_set_auplay(dev);
+	}
+}
+
+void msystem_stop_silencing(void)
+{
+	if (!g_msys)
+		return;
+
+	if (streq(g_msys->name, "voe")) {
+		voe_stop_silencing();
+	}
+}
+
+bool msystem_get_muted(void)
+{
+	bool muted = false;
+
+	if (g_msys) {		
+		if (streq(g_msys->name, "voe")) {
+			voe_get_mute(&muted);
+		}
+	}
+
+	return muted;
+}
+
+void msystem_set_muted(bool muted)
+{
+	if (g_msys) {		
+		if (streq(g_msys->name, "voe")) {
+			voe_set_mute(muted);
+		}
+	}
+}
+
+
+struct dnsc *msystem_dnsc(void)
+{
+	return g_msys ? g_msys->dnsc : NULL;
+}

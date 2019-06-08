@@ -52,13 +52,6 @@ static void destructor(void *data)
 		X509_free(tls->cert);
 
 	mem_deref(tls->pass);
-
-#ifdef TLS_BIO_OPAQUE
-	if (tls->method_tcp)
-		BIO_meth_free(tls->method_tcp);
-	if (tls->method_udp)
-		BIO_meth_free(tls->method_udp);
-#endif
 }
 
 
@@ -199,15 +192,6 @@ int tls_alloc(struct tls **tlsp, enum tls_method method, const char *keyfile,
 			goto out;
 		}
 	}
-
-#ifdef TLS_BIO_OPAQUE
-	tls->method_tcp = tls_method_tcp();
-	tls->method_udp = tls_method_udp();
-	if (!tls->method_tcp || !tls->method_udp) {
-		err = ENOMEM;
-		goto out;
-	}
-#endif
 
 	err = 0;
  out:
@@ -751,6 +735,22 @@ int tls_srtp_keyinfo(const struct tls_conn *tc, enum srtp_suite *suite,
 		salt_size = 14;
 		break;
 
+#ifdef SRTP_AEAD_AES_128_GCM
+	case SRTP_AEAD_AES_128_GCM:
+		*suite = SRTP_AES_128_GCM;
+		key_size  = 16;
+		salt_size = 12;
+		break;
+#endif
+
+#ifdef SRTP_AEAD_AES_256_GCM
+	case SRTP_AEAD_AES_256_GCM:
+		*suite = SRTP_AES_256_GCM;
+		key_size  = 32;
+		salt_size = 12;
+		break;
+#endif
+
 	default:
 		return ENOSYS;
 	}
@@ -888,4 +888,17 @@ static int print_error(const char *str, size_t len, void *unused)
 void tls_flush_error(void)
 {
 	ERR_print_errors_cb(print_error, NULL);
+}
+
+
+/**
+ * Get the backend-specific (OpenSSL) context
+ *
+ * @param tls  Generic TLS Context
+ *
+ * @return OpenSSL context
+ */
+struct ssl_ctx_st *tls_openssl_context(const struct tls *tls)
+{
+	return tls ? tls->ctx : NULL;
 }

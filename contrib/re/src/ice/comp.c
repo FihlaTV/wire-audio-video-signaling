@@ -52,7 +52,7 @@ static bool helper_recv_handler(struct sa *src, struct mbuf *mb, void *arg)
 			break;
 
 		default:
-			(void)stun_ctrans_recv(icem->ice->stun, msg, &ua);
+			(void)stun_ctrans_recv(icem->stun, msg, &ua);
 			break;
 		}
 	}
@@ -68,7 +68,6 @@ static void destructor(void *arg)
 	struct icem_comp *comp = arg;
 
 	tmr_cancel(&comp->tmr_ka);
-	mem_deref(comp->ct_gath);
 	mem_deref(comp->turnc);
 	mem_deref(comp->cp_sel);
 	mem_deref(comp->def_lcand);
@@ -266,7 +265,7 @@ void icecomp_printf(struct icem_comp *comp, const char *fmt, ...)
 {
 	va_list ap;
 
-	if (!comp || !comp->icem->ice->conf.debug)
+	if (!comp || !comp->icem->conf.debug)
 		return;
 
 	va_start(ap, fmt);
@@ -285,4 +284,22 @@ int icecomp_debug(struct re_printf *pf, const struct icem_comp *comp)
 			  comp->def_lcand ? &comp->def_lcand->addr : NULL,
 			  comp->def_rcand ? &comp->def_rcand->addr : NULL,
 			  comp->concluded);
+}
+
+
+int icem_set_turn_client(struct icem *icem, unsigned compid,
+			 struct turnc *turnc)
+{
+	struct icem_comp *comp;
+
+	comp = icem_comp_find(icem, compid);
+	if (!comp)
+		return ENOENT;
+
+	comp->turnc = mem_deref(comp->turnc);
+
+	if (turnc)
+		comp->turnc = mem_ref(turnc);
+
+	return 0;
 }

@@ -51,14 +51,18 @@ int vie_dec_alloc(struct viddec_state **vdsp,
 		  struct sdp_media *sdpm,
 		  struct vidcodec_param *prm,
 		  viddec_err_h *errh,
+		  void *extcodec_arg,
 		  void *arg)
 {
 	struct viddec_state *vds;
 	int err = 0;
 
+	(void)extcodec_arg; /* not an external codec */
+	
 	if (!vdsp || !vc || !mctxp)
 		return EINVAL;
 
+	
 	info("%s: allocating codec:%s(%d)\n", __FUNCTION__, vc->name, pt);
 
 	vds = (struct viddec_state *)mem_zalloc(sizeof(*vds), vds_destructor);
@@ -113,7 +117,19 @@ static bool sdp_has_remb(struct viddec_state *vds){
 	return goog_remb ? true : false;
 }
 
-int vie_render_start(struct viddec_state *vds)
+static bool get_extmap_ids(const char *name, const char *value, void *arg)
+{
+	struct viddec_state *vds = (struct viddec_state*)arg;
+	if (0 == re_regex(value, strlen(value), EXTMAP_VIDEO_ORIENTATION)) {
+		vds->extmap_rotation = atoi(value);
+	}
+	if (0 == re_regex(value, strlen(value), EXTMAP_ABS_SEND_TIME)) {
+		vds->extmap_abstime = atoi(value);
+	}
+	return false;
+}
+
+int vie_render_start(struct viddec_state *vds, const char* userid_remote)
 {
   	webrtc::VideoReceiveStream::Decoder decoder;
 	struct vie *vie = vds ? vds->vie : NULL;
@@ -177,13 +193,19 @@ int vie_render_start(struct viddec_state *vds)
 #if USE_RTX
 #endif
 
-	receive_config.rtp.extensions.push_back(
-		webrtc::RtpExtension(webrtc::RtpExtension::kAbsSendTime,
-		kAbsSendTimeExtensionId));
-	receive_config.rtp.extensions.push_back(
-		webrtc::RtpExtension(webrtc::RtpExtension::kVideoRotation,
-		kVideoRotationRtpExtensionId));
-	vie->receive_renderer = new ViERenderer();
+	sdp_media_rattr_apply(vds->sdpm, "extmap", get_extmap_ids, vds);
+	if (vds->extmap_abstime > 0) {
+		receive_config.rtp.extensions.push_back(
+			webrtc::RtpExtension(webrtc::RtpExtension::kAbsSendTime,
+			vds->extmap_abstime));
+	}
+
+	if (vds->extmap_rotation > 0) {
+		receive_config.rtp.extensions.push_back(
+			webrtc::RtpExtension(webrtc::RtpExtension::kVideoRotation,
+			vds->extmap_rotation));
+	}
+	vie->receive_renderer = new ViERenderer(userid_remote);
 	receive_config.renderer = vie->receive_renderer;
 
 	decoder.payload_type = vds->pt;
@@ -195,7 +217,7 @@ int vie_render_start(struct viddec_state *vds)
 	// TODO: find the new version of this flag
 	//receive_config.enable_vqi = (avs_get_flags() & AVS_FLAG_EXPERIMENTAL);
     
-	vie->receive_stream = vie->call->CreateVideoReceiveStream(receive_config);
+	vie->receive_stream = vie->call->CreateVideoReceiveStream(std::move(receive_config));
 
 	vie->receive_stream->Start();
 
@@ -356,8 +378,13 @@ void vie_dec_rtcp_handler(struct viddec_state *vds,
 			vie->stats_rx.rtcp.bitrate_limit);
 	}
 
-	delstat = vie->call->Receiver()->DeliverPacket(webrtc::MediaType::VIDEO, pkt, len, pt);
+	delstat = vie->call->Receiver()->DeliverPacket(webrtc::MediaType::VIDEO,
+						       pkt, len, pt);
+	if (delstat != webrtc::PacketReceiver::DELIVERY_OK) {
+		warning("vie: RTCP DeliverPacket error %d\n", delstat);
+	}
 }
+
 
 uint32_t vie_dec_getbw(struct viddec_state *vds)
 {

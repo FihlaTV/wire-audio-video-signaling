@@ -31,6 +31,9 @@ struct avs_vidframe;
 AVS_EXPORT @interface AVSVideoView : UIView
 
 @property (nonatomic) BOOL shouldFill;
+@property (nonatomic) CGFloat fillRatio;
+@property (copy) NSString *userid;
+@property (readonly) CGSize videoSize;
 
 - (BOOL) handleFrame:(struct avs_vidframe*) frame;
 

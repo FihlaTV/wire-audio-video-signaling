@@ -32,48 +32,60 @@
 enum {
 	MIN_SEND_BANDWIDTH = 100,  /* kilobits/second */
 	MAX_SEND_BANDWIDTH = 800,  /* kilobits/second */
+	MAX_GROUP_SEND_BANDWIDTH = 300,  /* kilobits/second */
 };
 
 const size_t num_resolutions = 4;
-const struct resolution_info {
-	uint32_t width;
-	uint32_t height;
-	uint32_t max_fps;
-	uint32_t min_br;
-	uint32_t max_br;
-}
-resolutions[num_resolutions] = {
+const struct resolution_info resolutions[num_resolutions] = {
 	{640, 480, 15, 500, 800},
 	{480, 360, 15, 200, 600},
 	{320, 240, 15, 100, 300},
 	{240, 180, 15,   0, 150}
 };
 
+const size_t num_group_resolutions = 2;
+const struct resolution_info group_resolutions[num_group_resolutions] = {
+	{320, 240, 15, 100, 300},
+	{240, 180, 15,   0, 150}
+};
 
-static enum flowmgr_video_send_state _send_state = FLOWMGR_VIDEO_SEND_NONE;
-
-static int get_resolution_for_bitrate(uint32_t bitrate)
+static const resolution_info *get_resolution_for_bitrate(uint32_t bitrate, bool group_mode)
 {
 	size_t r = 0;
 
-	while (r < num_resolutions - 1) {
-		if (bitrate > (resolutions[r].min_br * 1000)) {
-			break;
+	if (group_mode) {
+		while (r < num_group_resolutions - 1) {
+			if (bitrate > (group_resolutions[r].min_br * 1000)) {
+				break;
+			}
+			r++;
 		}
-		r++;
-	}
 
-	return r;
+		return &group_resolutions[r];
+	}
+	else {
+		while (r < num_resolutions - 1) {
+			if (bitrate > (resolutions[r].min_br * 1000)) {
+				break;
+			}
+			r++;
+		}
+
+		return &resolutions[r];
+	};
 }
 
-std::vector<webrtc::VideoStream> CreateVideoStream(size_t res_idx,
+std::vector<webrtc::VideoStream> CreateVideoStream(const struct resolution_info *res,
 	bool rtp_rotation, int32_t max_bandwidth) {
 
+	if (!res) {
+		res = &resolutions[num_resolutions - 1];
+	}
 	std::vector<webrtc::VideoStream> stream_settings(1);
 	
-	uint32_t width = resolutions[res_idx].width;
-	uint32_t height = resolutions[res_idx].height;
-	uint32_t fps = resolutions[res_idx].max_fps;
+	uint32_t width = res->width;
+	uint32_t height = res->height;
+	uint32_t fps = res->max_fps;
 
 	stream_settings[0].width = rtp_rotation ? width : height;
 	stream_settings[0].height = rtp_rotation ? height : width;
@@ -87,11 +99,11 @@ std::vector<webrtc::VideoStream> CreateVideoStream(size_t res_idx,
 	return stream_settings;
 }
 
-webrtc::VideoEncoderConfig CreateEncoderConfig(size_t res_idx,
+webrtc::VideoEncoderConfig CreateEncoderConfig(const struct resolution_info *res,
 	bool rtp_rotation, int32_t max_bandwidth) {
 
 	webrtc::VideoEncoderConfig encoder_config;
-	encoder_config.streams = CreateVideoStream(res_idx, rtp_rotation, 
+	encoder_config.streams = CreateVideoStream(res, rtp_rotation, 
 		max_bandwidth);
 	return encoder_config;
 }
@@ -117,41 +129,42 @@ static void ves_destructor(void *arg)
 	mem_deref(ves->sdpm);
 	mem_deref(ves->vie);
 
-	_send_state = FLOWMGR_VIDEO_SEND_NONE;
+	ves->send_state = FLOWMGR_VIDEO_SEND_NONE;
 }
 
-static bool check_rotation_attr(const char *name, const char *value, void *arg){
-	if (0 == re_regex(value, strlen(value), "urn:3gpp:video-orientation")){
-		return true;
-		} else{
-		return false;
+static bool get_extmap_ids(const char *name, const char *value, void *arg)
+{
+	struct videnc_state *ves = (struct videnc_state*)arg;
+	if (0 == re_regex(value, strlen(value), EXTMAP_VIDEO_ORIENTATION)) {
+		ves->extmap_rotation = atoi(value);
 	}
+	if (0 == re_regex(value, strlen(value), EXTMAP_ABS_SEND_TIME)) {
+		ves->extmap_abstime = atoi(value);
+	}
+	return false;
 }
 
-static bool sdp_has_rtp_rotation(struct videnc_state *ves){
-	const char *rot;
-	rot = sdp_media_rattr_apply(ves->sdpm, "extmap", check_rotation_attr, NULL);
-
-	return rot ? true : false;
-}
-
-static int32_t sdp_get_max_bandwidth(struct videnc_state *ves){
+static int32_t sdp_get_max_bandwidth(struct videnc_state *ves)
+{
 	int32_t bw = sdp_media_rbandwidth(ves->sdpm, SDP_BANDWIDTH_AS);
 
-	debug("%s: sdpbw: %d min: %d max: %d\n", __FUNCTION__, bw,
-		MIN_SEND_BANDWIDTH, MAX_SEND_BANDWIDTH);
+	
+	int32_t my_max = ves->group_mode ? MAX_GROUP_SEND_BANDWIDTH : MAX_SEND_BANDWIDTH;
+	
+	debug("%s: sdpbw: %d min: %d max: %d grp: %s\n", __FUNCTION__, bw,
+		MIN_SEND_BANDWIDTH, my_max, ves->group_mode ? "true" : "false");
 
 	if (bw < 0) {
 		/* Remote hasnt specified, send my max */
-		bw = MAX_SEND_BANDWIDTH;
+		bw = my_max;
 	}
 	else if (bw < MIN_SEND_BANDWIDTH) {
 		/* Remotes max is less than my min, send my min */
 		bw = MIN_SEND_BANDWIDTH;
 	}
-	else if (bw > MAX_SEND_BANDWIDTH) {
+	else if (bw > my_max) {
 		/* Remote accepts more than my max, send my max */
-		bw = MAX_SEND_BANDWIDTH;
+		bw = my_max;
 	}
 	/* else send bw */
 	
@@ -168,6 +181,7 @@ int vie_enc_alloc(struct videnc_state **vesp,
 		  videnc_rtp_h *rtph,
 		  videnc_rtcp_h *rtcph,
 		  viddec_err_h *errh,
+		  void *extcodec_arg,
 		  void *arg)
 {
 	struct videnc_state *ves;
@@ -176,6 +190,8 @@ int vie_enc_alloc(struct videnc_state **vesp,
 	if (!vesp || !vc || !mctxp)
 		return EINVAL;
 
+	(void)extcodec_arg; /* not an external codec */
+	
 	info("%s: allocating codec:%s(%d)\n", __FUNCTION__, vc->name, pt);
 
 	ves = (struct videnc_state *)mem_zalloc(sizeof(*ves), ves_destructor);
@@ -195,6 +211,8 @@ int vie_enc_alloc(struct videnc_state **vesp,
 	}
 
 
+	ves->send_state = FLOWMGR_VIDEO_SEND_NONE;
+
 	ves->vc = vc;
 	ves->pt = pt;
 	ves->sdpm = (struct sdp_media *)mem_ref(sdpm);
@@ -206,6 +224,7 @@ int vie_enc_alloc(struct videnc_state **vesp,
 	if (prm)
 		ves->prm = *prm;
 
+	ves->curr_res = &resolutions[num_resolutions - 1];
  out:
 	if (err) {
 		mem_deref(ves);
@@ -228,7 +247,7 @@ static bool rtx_format_handler(struct sdp_format *fmt, void *arg)
 }
 
 
-static int vie_capture_start_int(struct videnc_state *ves)
+static int vie_capture_start_int(struct videnc_state *ves, bool group_mode)
 {
 	struct vie *vie = ves ? ves->vie: NULL;
 	int err = 0;
@@ -236,20 +255,24 @@ static int vie_capture_start_int(struct videnc_state *ves)
 	if (!ves || !vie)
 		return EINVAL;
 
+	sdp_media_rattr_apply(ves->sdpm, "extmap", get_extmap_ids, ves);
 #if USE_RTP_ROTATION
-	ves->rtp_rotation = sdp_has_rtp_rotation(ves);
+	ves->rtp_rotation = ves->extmap_rotation > 0;
 #else
 	ves->rtp_rotation = false;
 #endif
 
+	ves->group_mode = group_mode;
+	
 	ves->max_bandwidth = sdp_get_max_bandwidth(ves);
-	ves->res_idx = get_resolution_for_bitrate(ves->max_bandwidth * 1000);
+	ves->curr_res = get_resolution_for_bitrate(ves->max_bandwidth * 1000, ves->group_mode);
+	ves->ts_res_changed = tmr_jiffies();
 
 	info("%s: remote side %s support rotation\n", __FUNCTION__,
 		ves->rtp_rotation ? "does" : "does not");
 	webrtc::VideoSendStream::Config send_config(vie->transport);
 	webrtc::VideoEncoderConfig encoder_config(CreateEncoderConfig(
-		ves->res_idx, ves->rtp_rotation, ves->max_bandwidth));
+		ves->curr_res, ves->rtp_rotation, ves->max_bandwidth));
 
 	send_config.rtp.ssrcs.push_back(ves->prm.local_ssrcv[0]);
 	send_config.rtp.nack.rtp_history_ms = 0;
@@ -287,13 +310,15 @@ static int vie_capture_start_int(struct videnc_state *ves)
 	vie->stats_rx.rtcp.ssrc = ves->prm.local_ssrcv[0];
 	vie->stats_rx.rtcp.bitrate_limit = 0;
 
-	send_config.rtp.extensions.push_back(
-		webrtc::RtpExtension(webrtc::RtpExtension::kAbsSendTime,
-		kAbsSendTimeExtensionId));
+	if (ves->extmap_abstime > 0) {
+		send_config.rtp.extensions.push_back(
+			webrtc::RtpExtension(webrtc::RtpExtension::kAbsSendTime,
+			ves->extmap_abstime));
+	}
 	if (ves->rtp_rotation) {
 		send_config.rtp.extensions.push_back(
 			webrtc::RtpExtension(webrtc::RtpExtension::kVideoRotation,
-			kVideoRotationRtpExtensionId));
+			ves->extmap_rotation));
 	}
 
 	vie->encoder = webrtc::VideoEncoder::Create(webrtc::VideoEncoder::kVp8);
@@ -323,17 +348,17 @@ out:
 	return err;
 }
 
-int vie_capture_start(struct videnc_state *ves)
+int vie_capture_start(struct videnc_state *ves, bool group_mode)
 {
 	int err = 0;
-	if (_send_state == FLOWMGR_VIDEO_SEND) {
+	if (ves->send_state == FLOWMGR_VIDEO_SEND) {
 		return 0;
 	}
 
-	debug("%s: ss %d\n", __FUNCTION__, _send_state);
-	err = vie_capture_start_int(ves);
+	debug("%s: ss %d\n", __FUNCTION__, ves->send_state);
+	err = vie_capture_start_int(ves, group_mode);
 	if (err == 0) {
-		_send_state = FLOWMGR_VIDEO_SEND;
+		ves->send_state = FLOWMGR_VIDEO_SEND;
 	}
 
 	return err;
@@ -343,7 +368,7 @@ static void vie_capture_stop_int(struct videnc_state *ves)
 {
 	struct vie *vie = ves ? ves->vie: NULL;
 
-	if (!ves || _send_state == FLOWMGR_VIDEO_SEND_NONE) {
+	if (!ves || ves->send_state == FLOWMGR_VIDEO_SEND_NONE) {
 		return;
 	}
 
@@ -365,9 +390,9 @@ static void vie_capture_stop_int(struct videnc_state *ves)
 
 void vie_capture_stop(struct videnc_state *ves)
 {
-	debug("%s: ss %d\n", __FUNCTION__, _send_state);
+	debug("%s: ss %d\n", __FUNCTION__, ves->send_state);
 	vie_capture_stop_int(ves);
-	_send_state = FLOWMGR_VIDEO_SEND_NONE;
+	ves->send_state = FLOWMGR_VIDEO_SEND_NONE;
 }
 
 void vie_capture_hold(struct videnc_state *ves, bool hold)
@@ -426,6 +451,9 @@ uint32_t vie_capture_getbw(struct videnc_state *ves)
 void vie_bandwidth_allocation_changed(struct vie *vie, uint32_t ssrc, uint32_t allocation)
 {
 	struct videnc_state *ves = vie ? vie->ves : NULL;
+	const struct resolution_info *target_res;
+	uint64_t now = tmr_jiffies();
+	bool switch_now = false;
 	int r = 0;
 
 	if (!vie || !ves || !vie->send_stream) {
@@ -436,23 +464,38 @@ void vie_bandwidth_allocation_changed(struct vie *vie, uint32_t ssrc, uint32_t a
 		return;
 	}
 
-	if (allocation < resolutions[ves->res_idx].min_br * 1000 ||
-		allocation > resolutions[ves->res_idx].max_br * 1000) {
-		size_t target_res = get_resolution_for_bitrate(allocation);
+	if (allocation < ves->curr_res->min_br * 1000 ||
+		allocation > ves->curr_res->max_br * 1000) {
+		target_res = get_resolution_for_bitrate(allocation, ves->group_mode);
 
-		if (target_res != ves->res_idx) {
+		if (!target_res || (target_res == ves->curr_res)) {
+			ves->ts_res_changed = now;
+			return;
+		}
+
+		// Downswitch immediately
+		if (!ves->curr_res || (target_res->height < ves->curr_res->height)) {
+			switch_now = true;
+		}
+		// Upswitch if bigger for 60 seconds
+		else if (now - ves->ts_res_changed > 60000) {
+			switch_now = true;
+		}
+
+		if (switch_now) {
 			info("%s send resolution changed from %ux%u to %ux%u br: %u\n",
 				__FUNCTION__,
-				resolutions[ves->res_idx].width,
-				resolutions[ves->res_idx].height,
-				resolutions[target_res].width,
-				resolutions[target_res].height,
+				ves->curr_res->width,
+				ves->curr_res->height,
+				target_res->width,
+				target_res->height,
 				allocation);
 
 			webrtc::VideoEncoderConfig config = CreateEncoderConfig(target_res,
 				ves->rtp_rotation, ves->max_bandwidth);
 			vie->send_stream->ReconfigureVideoEncoder(config);
-			ves->res_idx = target_res;
+			ves->curr_res = target_res;
+			ves->ts_res_changed = now;
 		}
 	}
 }

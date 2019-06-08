@@ -44,7 +44,8 @@ typedef NS_ENUM (NSUInteger, AVSPlaybackRoute) {
     AVSPlaybackRouteUnknown,
     AVSPlaybackRouteBuiltIn,
     AVSPlaybackRouteHeadset,
-    AVSPlaybackRouteSpeaker
+    AVSPlaybackRouteSpeaker,
+    AVSPlaybackRouteBluetooth
 };
 
 typedef NS_ENUM (NSUInteger, AVSRecordingMode){
@@ -108,6 +109,7 @@ AVS_EXPORT @interface AVSMediaManagerChangeNotification : NSNotification
 AVS_EXPORT @interface AVSMediaManager : NSObject
 
 @property (nonatomic) AVSPlaybackRoute playbackRoute;
+@property (nonatomic, assign) BOOL sysUpdated;
 
 + (instancetype)defaultMediaManager;
 - (void)playMediaByName:(NSString *)name;
@@ -139,5 +141,7 @@ AVS_EXPORT @interface AVSMediaManager : NSObject
 - (void)startAudio;
 - (void)stopAudio;
 - (void)setUiStartsAudio:(BOOL)ui_starts_audio;
+- (void)startRecordingWhenReady:(dispatch_block_t)block;
+- (void)stopRecording;
 
 @end

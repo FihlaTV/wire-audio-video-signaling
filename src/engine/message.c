@@ -33,287 +33,11 @@
 #include "avs_engine.h"
 #include "module.h"
 #include "engine.h"
+#include "message.h"
 #include "event.h"
 #include "user.h"
 #include "conv.h"
 #include "utils.h"
-
-enum {
-	ENGINE_MESSAGE_PAGE_SIZE = 100
-};
-
-
-/*** struct engine_msg
- */
-
-static void engine_msg_text_destructor(struct engine_msg_text *text)
-{
-	mem_deref(text->content);
-	mem_deref(text->nonce);
-}
-
-
-static void engine_msg_destructor(void *arg)
-{
-	struct engine_msg *msg = arg;
-
-	list_unlink(&msg->le);
-	mem_deref(msg->id);
-
-	switch (msg->type) {
-
-	case ENGINE_MSG_TEXT:
-		engine_msg_text_destructor(&msg->data.text);
-		break;
-
-	default:
-		break;
-	}
-}
-
-
-static int import_msg_text(struct engine_msg_text *text,
-			   struct engine *engine, struct json_object *jdata)
-{
-	int err;
-
-	(void) engine;
-
-	if (!jdata)
-		return EPROTO;
-
-	err = jzon_strdup(&text->content, jdata, "content");
-	if (err)
-		return err;
-	err = jzon_strdup(&text->nonce, jdata, "nonce");
-	if (err)
-		return err;
-
-	return 0;
-}
-
-
-static int import_msg(struct engine_msg **msgp, struct engine *engine,
-		      struct json_object *jobj)
-{
-	struct engine_msg *msg;
-	struct json_object *jdata = NULL;
-	const char *type;
-	const char *convid;
-	const char *fromid;
-	int err;
-
-	msg = mem_zalloc(sizeof(*msg), engine_msg_destructor);
-	if (!msg)
-		return ENOMEM;
-
-	type = jzon_str(jobj, "type");
-	if (!type) {
-		err = EPROTO;
-		goto out;
-	}
-
-	jzon_object(&jdata, jobj, "data");
-
-	convid = jzon_str(jobj, "conversation");
-	if (!convid) {
-		err = EPROTO;
-		goto out;
-	}
-	err = engine_lookup_conv(&msg->conv, engine, convid);
-	if (err)
-		goto out;
-
-	fromid = jzon_str(jobj, "from");
-	if (!fromid) {
-		err = EPROTO;
-		goto out;
-	}
-	err = engine_lookup_user(&msg->from, engine, fromid, true);
-	if (err)
-		goto out;
-
-	err = jzon_strdup(&msg->id, jobj, "id");
-	if (err)
-		goto out;
-
-	if (streq(type, "conversation.message-add")) {
-		msg->type = ENGINE_MSG_TEXT;
-		err = import_msg_text(&msg->data.text, engine, jdata);
-		if (err)
-			goto out;
-	}
-	else {
-		msg->type = ENGINE_MSG_UNKNOWN;
-	}
-
-	*msgp = msg;
-
-out:
-	if (err)
-		mem_deref(msg);
-	return err;
-}
-
-
-/*** engine_apply_messages
- */
-
-struct apply_message_data {
-	struct engine_conv *conv;
-	bool forward;
-	char end[64];
-	engine_msg_apply_h *h;
-	void *arg;
-};
-
-
-static void conversation_events_handler (int err, const struct http_msg *msg,
-				         struct mbuf *mb,
-					 struct json_object *jobj, void *arg);
-
-
-static int page_forwards(struct engine_conv *conv, const char *start,
-			 struct apply_message_data *data)
-{
-	if (start) {
-		return rest_get(NULL, conv->engine->rest, 0,
-				conversation_events_handler, data,
-			        "/conversations/%s/events?size=%i"
-			        "&start=%s&exclude_start=1", conv->id,
-			        ENGINE_MESSAGE_PAGE_SIZE, start);
-	}
-	else {
-		return rest_get(NULL, conv->engine->rest, 0,
-				conversation_events_handler, data,
-			        "/conversations/%s/events?size=%i",
-			        conv->id, ENGINE_MESSAGE_PAGE_SIZE);
-	}
-}
-
-
-static int page_backwards(struct engine_conv *conv, const char *start,
-			  struct apply_message_data *data)
-{
-	if (start) {
-		return rest_get(NULL, conv->engine->rest, 0,
-				conversation_events_handler, data,
-			        "/conversations/%s/events?size=-%i"
-				"&start=%s&exclude_start=1&end=0.0",
-				conv->id, ENGINE_MESSAGE_PAGE_SIZE, start);
-	}
-	else {
-		return rest_get(NULL, conv->engine->rest, 0,
-				conversation_events_handler, data,
-			        "/conversations/%s/events?size=-%i"
-				"&start=%s&end=0.0",
-				conv->id, ENGINE_MESSAGE_PAGE_SIZE,
-				conv->last_event);
-	}
-}
-
-
-static void conversation_events_handler (int err, const struct http_msg *msg,
-				         struct mbuf *mb,
-					 struct json_object *jobj, void *arg)
-{
-	struct apply_message_data *data = arg;
-	struct json_object *jevents;
-	int count, i;
-	const char *id = NULL;
-
-	err = engine_rest_err(err, msg);
-	if (err) {
-		warning("engine_apply_messages failed: %m.\n", err);
-		data->h(err, NULL, data->arg);
-		goto out;
-	}
-
-	err = jzon_array(&jevents, jobj, "events");
-	if (err) {
-		warning("engine_apply_messages: "
-			"no 'events' array in reply.\n");
-		data->h(err, NULL, data->arg);
-		goto out;
-	}
-
-	count = json_object_array_length(jevents);
-	for (i = 0; i < count; ++i) {
-		struct json_object *jitem;
-		struct engine_msg *emsg = NULL;
-
-		jitem = json_object_array_get_idx(jevents, i);
-		if (jitem == NULL)
-			continue;
-
-		id = jzon_str(jitem, "id");
-		err = import_msg(&emsg, data->conv->engine, jitem);
-		if (err == ENOENT)
-			continue;
-
-		if (err) {
-			data->h(err, NULL, data->arg);
-			goto out;
-		}
-
-		if (data->h(0, emsg, data->arg)) {
-			mem_deref(emsg);
-			err = ENOENT;
-			goto out;
-		}
-		else
-			mem_deref(emsg);
-
-		if (*data->end && streq(data->end, id)) {
-			data->h(0, NULL, data->arg);
-			err = ENOENT;
-			goto out;
-		}
-	}
-
-	if (id && jzon_bool_opt(jobj, "has_more", false)) {
-		if (data->forward)
-			err = page_forwards(data->conv, id, data);
-		else
-			err = page_backwards(data->conv, id, data);
-	}
-	else {
-		data->h(0, NULL, data->arg);
-		err = ENOENT;
-	}
-
- out:
-	if (err)
-		mem_deref(data);
-}
-
-
-int engine_apply_messages(struct engine_conv *conv, bool forward,
-			  const char *start, const char *end,
-			  engine_msg_apply_h *h, void *arg)
-{
-	struct apply_message_data *data;
-
-	if (!conv || !h)
-		return EINVAL;
-
-	data = mem_zalloc(sizeof(*data), NULL);
-	if (!data)
-		return ENOMEM;
-
-	data->conv = conv;
-	data->forward = forward;
-	data->h = h;
-	data->arg = arg;
-
-	if (end)
-		str_ncpy(data->end, end, sizeof(data->end));
-
-	if (forward)
-		return page_forwards(conv, start, data);
-	else
-		return page_backwards(conv, start, data);
-}
 
 
 /*** engine_set_last_read
@@ -342,9 +66,47 @@ int engine_set_last_read(struct engine_conv *conv, const char *msg_id)
  */
 
 struct otr_context {
+	engine_missing_client_h *missingh;
 	engine_status_h *resph;
 	void *arg;
 };
+
+
+static bool missing_user_handler(struct le *le, void *arg)
+{
+	const struct odict_entry *ue;
+	struct otr_context *ctx = arg;
+	const char *userid;
+	size_t count, i;
+
+	if (!ctx || !ctx->missingh) {
+		return true;
+	}
+	ue = (const struct odict_entry*)le->data;
+	if (!ue) {
+		warning("engine: missing_user_handler user has no data\n");
+		return false;
+	}
+	userid = ue->key;
+
+	count = odict_count(ue->u.odict, false);
+
+	for (i=0; i<count; i++) {
+		const struct odict_entry *ce;
+		char key[16];
+
+		re_snprintf(key, sizeof(key), "%zu", i);
+
+		ce = odict_lookup(ue->u.odict, key);
+		if (!ce || ce->type != ODICT_STRING)
+			continue;
+
+		ctx->missingh(userid, ce->u.str, ctx->arg);
+		
+	}
+
+	return false;
+}
 
 static void otr_resp_handler(int err, const struct http_msg *msg,
 			     struct mbuf *mb, struct json_object *jobj,
@@ -357,7 +119,24 @@ static void otr_resp_handler(int err, const struct http_msg *msg,
 		goto out;
 	}
 
-	if (msg->scode >= 300) {
+	if (msg->scode == 412) {
+		struct odict *dict;
+		const struct odict_entry *missing;
+
+		dict = jzon_get_odict(jobj);
+		missing  = odict_lookup(dict, "missing");
+
+		list_apply(&missing->u.odict->lst, true, missing_user_handler, ctx);
+
+		err = EAGAIN;
+	}
+	else if (msg->scode == 408 || (msg->scode >= 500 && msg->scode < 600)) {
+		/* Server error, retry */
+		warning("engine: otr message failed (%u %r) retrying\n",
+			msg->scode, &msg->reason);
+		err = EAGAIN;
+	}
+	else if (msg->scode >= 300) {
 		warning("engine: otr message failed (%u %r)\n",
 			msg->scode, &msg->reason);
 
@@ -438,11 +217,14 @@ int engine_recipient_msg_alloc(struct recipient_msg **rmsgp)
 }
 
 
-int engine_send_otr_message(struct engine_conv *conv,
+int engine_send_message(struct engine_conv *conv,
 			    const char *sender_clientid,
 			    struct list *msgl,
 			    bool transient,
-			    engine_status_h *resph, void *arg)
+			    bool ignore_missing,
+			    engine_status_h *resph,
+			    engine_missing_client_h *missingh,
+			    void *arg)
 {
 	struct json_object *jobj, *recipients, *map;
 	struct otr_context *ctx;
@@ -455,6 +237,7 @@ int engine_send_otr_message(struct engine_conv *conv,
 
 	ctx = mem_zalloc(sizeof(*ctx), NULL);
 	ctx->resph = resph;
+	ctx->missingh = missingh;
 	ctx->arg = arg;
 
 	jobj       = json_object_new_object();
@@ -494,7 +277,8 @@ int engine_send_otr_message(struct engine_conv *conv,
 
 	err = rest_request_jobj(NULL, conv->engine->rest, priority,
 				"POST", otr_resp_handler, ctx, jobj,
-				"/conversations/%s/otr/messages", conv->id);
+				"/conversations/%s/otr/messages%s", conv->id,
+				ignore_missing ? "?ignore_missing=true" : "");
 	if (err)
 		goto out;
 
@@ -587,68 +371,6 @@ int engine_send_file(struct engine_conv *conv, const char *ctype,
 	mem_deref(buf);
 	return err;
 }
-
-
-/*** conversation.message-add events
- */
-
-static void conv_message_add_handler(struct engine *engine, const char *type,
-				     struct json_object *jobj, bool catchup)
-{
-	const char *conv_id;
-	struct engine_conv *conv;
-	const char *from_id;
-	struct engine_user *from;
-	struct json_object *jdata;
-	const char *content;
-	const char *event_id;
-	struct le *le;
-	int err;
-
-	conv_id = jzon_str(jobj, "conversation");
-	if (!conv_id)
-		return;
-
-	err = engine_lookup_conv(&conv, engine, conv_id);
-	if (err) {
-		info("message in unknown conversation '%s'.\n", conv_id);
-		return;
-	}
-
-	event_id = jzon_str(jobj, "id");
-	if (!event_id)
-		return;
-
-	from_id = jzon_str(jobj, "from");
-	if (!from_id)
-		return;
-
-	err = engine_lookup_user(&from, engine, from_id, true);
-	if (err)
-		return;
-
-	err = jzon_object(&jdata, jobj, "data");
-	if (err)
-		return;
-
-	content = jzon_str(jdata, "content");
-	if (!content)
-		return;
-
-	LIST_FOREACH(&engine->lsnrl, le) {
-		struct engine_lsnr *lsnr = le->data;
-
-		if (lsnr->addmsgh) {
-			lsnr->addmsgh(conv, from, event_id, content,
-				      lsnr->arg);
-		}
-	}
-}
-
-struct engine_event_lsnr conv_message_add_lsnr = {
-	.type = "conversation.message-add",
-	.eventh = conv_message_add_handler
-};
 
 
 /*** conversation.otr-message-add events
@@ -812,7 +534,6 @@ struct engine_event_lsnr any_event_lsnr = {
 
 static int init_handler(void)
 {
-	engine_event_register(&conv_message_add_lsnr);
 	engine_event_register(&conv_otr_message_add_lsnr);
 	engine_event_register(&any_event_lsnr);
 	return 0;

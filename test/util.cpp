@@ -15,6 +15,11 @@
 * You should have received a copy of the GNU General Public License
 * along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+
+#define _GNU_SOURCE 1
+#include <sys/time.h>
+#include <sys/resource.h>
+
 #include <re.h>
 #include <avs.h>
 #include "ztest.h"
@@ -118,22 +123,15 @@ int create_dtls_srtp_context(struct tls **dtlsp, enum tls_keytype cert_type)
 	if (err)
 		goto out;
 
-	//err = tls_set_ciphers(dtls);
-	if (err)
-		goto out;
-
 	switch (cert_type) {
-
-	case TLS_KEYTYPE_RSA:  /* XXX: RSA is deprecated, remove */
-		err = tls_set_certificate(dtls, fake_certificate_rsa,
-					  strlen(fake_certificate_rsa));
-		break;
 
 	case TLS_KEYTYPE_EC:
 		err = cert_tls_set_selfsigned_ecdsa(dtls, "prime256v1");
 		break;
 
 	default:
+		warning("create_dtls_srtp_context: certificate type %d"
+			" not supported\n", cert_type);
 		err = ENOTSUP;
 		goto out;
 	}
@@ -143,7 +141,11 @@ int create_dtls_srtp_context(struct tls **dtlsp, enum tls_keytype cert_type)
 
 	tls_set_verify_client(dtls);
 
-	err = tls_set_srtp(dtls, "SRTP_AES128_CM_SHA1_80");
+	err = tls_set_srtp(dtls,
+			   "SRTP_AEAD_AES_256_GCM:"
+			   "SRTP_AEAD_AES_128_GCM:"
+			   "SRTP_AES128_CM_SHA1_80:"
+			   "SRTP_AES128_CM_SHA1_32");
 	if (err)
 		goto out;
 
@@ -154,4 +156,23 @@ int create_dtls_srtp_context(struct tls **dtlsp, enum tls_keytype cert_type)
 		*dtlsp = dtls;
 
 	return err;
+}
+
+
+int ztest_set_ulimit(unsigned num)
+{
+	struct rlimit limit;
+	int err;
+
+	getrlimit(RLIMIT_NOFILE, &limit);
+
+	limit.rlim_cur = num;  /* Soft limit */
+
+	if (setrlimit(RLIMIT_NOFILE, &limit) != 0) {
+		err = errno;
+		warning("setrlimit() failed with errno %m\n", err);
+		return err;
+	}
+
+	return 0;
 }

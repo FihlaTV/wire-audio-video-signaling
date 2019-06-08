@@ -231,6 +231,11 @@ struct ice_cand *icem_cand_find(const struct list *lst, unsigned compid,
 
 /**
  * Find the highest priority LCAND on the check-list of type HOST/RELAY
+ *
+ * @param icem    ICE Media object
+ * @param compid  Component ID
+ *
+ * @return Local candidate if found, otherwise NULL
  */
 struct ice_cand *icem_lcand_find_checklist(const struct icem *icem,
 					   unsigned compid)
@@ -255,6 +260,18 @@ struct ice_cand *icem_lcand_find_checklist(const struct icem *icem,
 	}
 
 	return NULL;
+}
+
+
+struct ice_cand *icem_lcand_base(struct ice_cand *lcand)
+{
+	return lcand ? lcand->base : NULL;
+}
+
+
+const struct sa *icem_lcand_addr(const struct ice_cand *cand)
+{
+	return cand ? &cand->addr : NULL;
 }
 
 
@@ -297,4 +314,9 @@ int icem_cand_print(struct re_printf *pf, const struct ice_cand *cand)
 			  ice_cand_type2name(cand->type), &cand->addr);
 
 	return err;
+}
+
+enum ice_cand_type icem_cand_type(const struct ice_cand *cand)
+{
+	return cand ? cand->type : (enum ice_cand_type)-1;
 }

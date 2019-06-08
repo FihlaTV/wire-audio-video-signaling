@@ -17,6 +17,7 @@
 */
 #include <openssl/crypto.h>
 #include <re.h>
+#include <sodium.h>
 
 #include "avs_log.h"
 #include "avs_base.h"
@@ -24,14 +25,13 @@
 #include "avs_zapi.h"
 #include "avs_media.h"
 #include "avs_flowmgr.h"
+#include "avs_version.h"
 
 
 #define DEBUG_MODULE ""
 #define DEBUG_LEVEL 0
 #include <re/re_dbg.h>
 
-
-static const char *avs_software = AVS_PROJECT " " AVS_VERSION " (" ARCH "/" OS ")";
 
 
 static struct {
@@ -79,20 +79,24 @@ static void debug_handler(int level, const char *p, size_t len, void *arg)
 
 int avs_init(uint64_t flags)
 {
+	if (sodium_init() == -1) {
+		warning("init: could not init libsodium\n");
+		return ENOSYS;
+	}
+
 	base.flags = flags;
 	base.inited = true;
 
 	dbg_handler_set(debug_handler, NULL);
 
-	info("AVS inited with flags=0x%llx [%s]\n", flags, avs_software);
+	info("AVS inited with flags=0x%llx [%s]\n", flags, avs_version_str());
 
 	info("init: using async polling method '%s'\n",
 	     poll_method_name(poll_method_best()));
 
-	info("init: libre:    %s\n", sys_libre_version_get());
-	info("init: openssl:  %s (%s)\n",
-	     SSLeay_version(SSLEAY_VERSION),
-	     SSLeay_version(SSLEAY_PLATFORM));
+	avs_print_versions();
+
+	avs_print_network();
 
 	return 0;
 }
@@ -131,7 +135,35 @@ uint64_t avs_get_flags(void)
 }
 
 
-const char *avs_get_token(void)
+void avs_print_versions(void)
 {
-	return base.token;
+	info("init: avs:      %s\n", avs_version_str());
+	info("init: libre:    %s\n", sys_libre_version_get());
+	info("init: openssl:  %s (%s)\n",
+	     SSLeay_version(SSLEAY_VERSION),
+	     SSLeay_version(SSLEAY_PLATFORM));
+	info("init: sodium:   %s\n", sodium_version_string());
+}
+
+
+static bool ifaddr_handler(const char *ifname, const struct sa *sa,
+			   void *arg)
+{
+	char buf[256] = "???";
+
+	net_if_getname(buf, sizeof(buf), sa_af(sa), sa);
+
+	info("init: interface: %-8s    %-26j  resolved='%s'\n", ifname, sa, buf);
+
+	return false;
+}
+
+
+void avs_print_network(void)
+{
+	info("init: network info:\n");
+
+	info("init: Interfaces:\n");
+	net_if_apply(ifaddr_handler, 0);
+	info("init\n");
 }

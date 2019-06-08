@@ -67,11 +67,14 @@ int voe_enc_alloc(struct auenc_state **aesp,
 		  auenc_rtp_h *rtph,
 		  auenc_rtcp_h *rtcph,
 		  auenc_err_h *errh,
+		  void *extcodec_arg,
 		  void *arg)
 {
 	struct auenc_state *aes;
 	int err = 0;
 
+	(void)extcodec_arg; /* Not an external codec */
+	
 	if (!aesp || !ac) {
 		return EINVAL;
 	}
@@ -94,8 +97,7 @@ int voe_enc_alloc(struct auenc_state **aesp,
 	aes->pt = prm->pt;
 	aes->srate = prm->srate;
 	//aes->ch = prm
-	aes->cbr = gvoe.cbr_enabled || prm->cbr;
-    prm->cbr = aes->cbr;
+	aes->cbr = prm->cbr;
     
 	*aesp = aes;
 
@@ -103,15 +105,20 @@ int voe_enc_alloc(struct auenc_state **aesp,
 }
 
 
-int voe_enc_start(struct auenc_state *aes, struct media_ctx **mctxp)
+int voe_enc_start(struct auenc_state *aes, bool cbr,
+		  const struct aucodec_param *prm,
+		  struct media_ctx **mctxp)
 {
 	int err = 0;
 	if (!aes || !mctxp)
 		return EINVAL;
 
+	aes->cbr = cbr;
+	
 	if (*mctxp) {
 		aes->ve = (struct voe_channel *)mem_ref(*mctxp);
-	} else {
+	}
+	else {
 		err = voe_ve_alloc(&aes->ve, aes->ac, aes->srate, aes->pt);
 		if (err) {
 			goto out;
@@ -120,6 +127,9 @@ int voe_enc_start(struct auenc_state *aes, struct media_ctx **mctxp)
 	}
     
 	aes->ve->aes = aes;
+	if (prm) {		
+		aes->local_ssrc = prm->local_ssrc;
+	}
         
 	if(gvoe.rtp_rtcp){
 		gvoe.rtp_rtcp->SetLocalSSRC(aes->ve->ch, aes->local_ssrc);
@@ -161,3 +171,4 @@ void voe_enc_stop(struct auenc_state *aes)
 	}
 	aes->ve = (struct voe_channel *)mem_deref(aes->ve);
 }
+

@@ -260,9 +260,29 @@ static AVSMediaManager *_defaultMediaManager;
 {
 }
 
+- (void)audioActivated
+{
+}
+
+- (void)audioDeActivated
+{
+}
+
 - (void)setUiStartsAudio:(BOOL)ui_starts_audio
 {
 }
+
+
+- (void)startRecordingWhenReady:(dispatch_block_t)block
+{
+}
+
+
+- (void)stopRecording
+{
+}
+
+
 
 @end
 
@@ -452,6 +472,7 @@ static AVSMediaManager *_defaultMediaManager;
 - (void)routeChanged:(AVSPlaybackRoute)route
 {
 }
+
 
 @end
 

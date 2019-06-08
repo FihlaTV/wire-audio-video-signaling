@@ -24,6 +24,7 @@
 #define MM_INTENSITY_THRES_NONE  0
 
 struct sound {
+	char *name;
 	const char *path;
 	const char *format;
 	bool loop;
@@ -32,6 +33,7 @@ struct sound {
 	int intensity;
 	int priority;
 	bool is_call_media;
+	bool sync; /* played synchronosuly */
 	void *arg;
 
 	struct le le; /* member of sounds list */
@@ -41,7 +43,21 @@ int sound_alloc(struct sound **sndp,
 		const char *path, const char *fmt,
 		bool loop, bool mixing, bool incall, int intensity, bool is_call_media);
 
-const char *MMroute2Str(enum mediamgr_auplay route);
+const char *mediamgr_route_name(enum mediamgr_auplay route);
+
+void mediamgr_enable_speaker_mm(struct mm *mm, bool enable);
+
+void mediamgr_set_call_state_mm(struct mm *mm, enum mediamgr_state state);
+void mediamgr_sys_incoming(struct mm *mm);
+void mediamgr_sys_entered_call(struct mm *mm);
+void mediamgr_sys_left_call(struct mm *mm);
+void mediamgr_hold_and_resume(struct mm *mm);
+bool mediamgr_get_speaker(struct mm *mm);
+void mediamgr_override_speaker_mm(struct mm *mm, bool speaker);
+void mediamgr_audio_release_mm(struct mm *mm);
+void mediamgr_audio_reset_mm(struct mm *mm);
+void mediamgr_reset_sounds(struct mm *mm);
+bool mediamgr_should_reset(struct mm *mm);
 
 
 #endif

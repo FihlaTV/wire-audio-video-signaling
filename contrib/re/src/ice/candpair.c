@@ -45,7 +45,7 @@ static void candpair_set_pprio(struct ice_candpair *cp)
 {
 	uint32_t g, d;
 
-	if (ROLE_CONTROLLING == cp->icem->ice->lrole) {
+	if (ICE_ROLE_CONTROLLING == cp->icem->lrole) {
 		g = cp->lcand->prio;
 		d = cp->rcand->prio;
 	}
@@ -147,7 +147,11 @@ int icem_candpair_clone(struct ice_candpair **cpp, struct ice_candpair *cp0,
 }
 
 
-/** Computing Pair Priority and Ordering Pairs */
+/**
+ * Computing Pair Priority and Ordering Pairs
+ *
+ * @param lst Checklist (struct ice_candpair)
+ */
 void icem_candpair_prio_order(struct list *lst)
 {
 	struct le *le;
@@ -222,6 +226,10 @@ void icem_candpair_set_state(struct ice_candpair *cp,
 
 /**
  * Delete all Candidate-Pairs where the Local candidate is of a given type
+ *
+ * @param lst     Checklist or Validlist
+ * @param type    Candidate type
+ * @param compid  Component ID
  */
 void icem_candpairs_flush(struct list *lst, enum ice_cand_type type,
 			  unsigned compid)
@@ -357,6 +365,11 @@ struct ice_candpair *icem_candpair_find_compid(const struct list *lst,
 
 /**
  * Find a remote candidate in the checklist or validlist
+ *
+ * @param icem    ICE Media object
+ * @param rcand   Remote candidate
+ *
+ * @return Candidate pair if found, otherwise NULL
  */
 struct ice_candpair *icem_candpair_find_rcand(struct icem *icem,
 					  const struct ice_cand *rcand)

@@ -7,7 +7,7 @@ AVS_SRCS += \
 	engine/event.c \
 	engine/message.c \
 	engine/module.c \
-	engine/search.c \
+	engine/otr.c \
 	engine/sync.c \
 	engine/user.c \
 	engine/utils.c
